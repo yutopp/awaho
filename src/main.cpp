@@ -9,13 +9,14 @@
 #include <iostream>
 #include <memory>
 #include <array>
-#include <unistd.h>
+
 #include <cstdlib>
 
 #include <sys/types.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #include <errno.h>
 #include <cstring>
 #include <string>
@@ -26,11 +27,12 @@
 
 #include <boost/scope_exit.hpp>
 #include <boost/optional.hpp>
-#include <boost/lexical_cast.hpp>
 
-#include <boost/algorithm/string.hpp>
+#include <boost/interprocess/anonymous_shared_memory.hpp>
+#include <boost/interprocess/mapped_region.hpp>
 
-#include <sstream>
+
+
 
 #include <random>
 #include <sys/resource.h>
@@ -42,6 +44,8 @@
 #include <atomic>
 #include <future>
 
+#include "files.hpp"
+#include "linux_user.hpp"
 
 namespace awaho
 {
@@ -51,6 +55,7 @@ namespace awaho
     {
         fs::path host_path;
         fs::path guest_path;
+        int permission;
         bool is_readonly;
     };
 
@@ -72,137 +77,10 @@ namespace awaho
         fs::path in_container_home_path;
         std::vector<mount_point> mount_points;
         limits_values limits;
+
+        std::size_t stack_size;
     };
 
-    namespace linux
-    {
-        auto simple_exec( std::string const& command ) noexcept
-            -> boost::optional<std::string>
-        {
-            FILE* const fp = ::popen( command.c_str(), "r" );
-            if ( fp == nullptr ) {
-                return boost::none;
-            }
-
-            BOOST_SCOPE_EXIT_ALL(&fp) {
-                pclose(fp);
-            };
-
-            try {
-                std::stringstream ss;
-                constexpr auto BufferSize = 128;
-                char buffer[BufferSize];
-
-                while( !::feof( fp ) ) {
-                    if ( ::fgets( buffer, BufferSize, fp ) != nullptr ) {
-                        ss << buffer;
-                    }
-                }
-
-                return ss.str();
-
-            } catch( std::exception const& e ) {
-                // TODO: I want to use "std::expected"...
-                return boost::none;
-            }
-        }
-
-        class user
-        {
-        public:
-            user() = delete;
-
-            // name will NOT be escaped. be careful
-            user( std::string const& name ) noexcept
-                : name_( name )
-                , is_valid_( false )
-                , is_user_created_( false )
-            {
-                auto const stat = std::system( ("useradd --no-create-home " + name_).c_str() );
-                if ( stat != 0 ) {
-                    // return;
-                }
-                is_user_created_ = true;
-
-                auto const user_id_s = simple_exec( "id --user " + name_ );
-                if ( !user_id_s ) {
-                    return;
-                }
-
-                auto const group_id_s = simple_exec( "id --group " + name_ );
-                if ( !group_id_s ) {
-                    return;
-                }
-
-                try {
-                    user_id_ = boost::lexical_cast<int>( boost::trim_copy( *user_id_s ) );
-                    group_id_ = boost::lexical_cast<int>( boost::trim_copy( *group_id_s ) );
-                    is_valid_ = true;
-
-                } catch(...) {
-                    // TODO: ...
-
-                }
-            }
-
-            user( user const& ) = delete;
-            user( user&& rhs )
-                : name_( std::move( rhs.name_ ) )
-                , is_valid_( rhs.is_valid_ )
-                , is_user_created_( rhs.is_user_created_ )
-                , user_id_( rhs.user_id_ )
-                , group_id_( rhs.group_id_ )
-            {
-                std::cout << "move ctor" << std::endl;
-                // set invalid status to moved data
-                rhs.is_valid_ = false;
-                rhs.is_user_created_ = false;
-            }
-
-            ~user()
-            {
-                if ( is_user_created_ ) {
-                    auto const stat = std::system( ("userdel " + name_).c_str() );
-                    std::cout << "user / delete stat: " << stat << std::endl;
-                }
-            }
-
-            auto valid() const
-                -> bool
-            {
-                return is_valid_;
-            }
-
-            auto name() const
-                -> std::string const&
-            {
-                return name_;
-            }
-
-            auto user_id() const
-                -> int
-            {
-                return user_id_;
-            }
-
-            auto group_id() const
-                -> int
-            {
-                return group_id_;
-            }
-
-        private:
-            std::string name_;
-
-            bool is_valid_;
-            bool is_user_created_;
-
-            int user_id_, group_id_;
-        };
-
-        //
-
-    }
 
     auto make_random_name()
         -> std::string
@@ -240,7 +118,6 @@ namespace awaho
     }
 
 
-
     // NOTE: be careful order of directories. short to long.
     static char const * const HostReadonlyMountPoints[] = {
         "/etc",
@@ -257,155 +134,11 @@ namespace awaho
         "/usr/local/torigoya",
     };
 
-    bool mount_directory(
-        fs::path const& host_mount_point,
-        fs::path const& guest_mount_point
-        )
-    {
-        // TODO: add timeout
-        // TODO: check permission
 
-        std::cout << "Mounting: " << host_mount_point << " to " << guest_mount_point << std::endl;
-
-        if ( !fs::is_directory( host_mount_point ) ) {
-            std::cerr << "Failed to mount: " << host_mount_point << " is not directory" << std::endl;
-            return false;
-        }
-
-        //
-        if ( fs::is_directory( guest_mount_point ) ) {
-            std::cerr << "Failed to mount: GUEST " << guest_mount_point << " is already exists" << std::endl;
-            return false;
-        }
-
-        fs::create_directories( guest_mount_point );
-
-        //
-        if ( ::mount(
-                 host_mount_point.c_str(),
-                 guest_mount_point.c_str(),
-                 nullptr,   // MS_BIND ignores this option
-                 MS_BIND | MS_RDONLY | MS_NOSUID | MS_NODEV,
-                 nullptr    // there is no data
-                 ) != 0 ) {
-            std::cerr << "Failed to mount: " << guest_mount_point << " errno=" << errno << " : " << std::strerror( errno ) << std::endl;
-            return false;
-        }
-
-        return true;
-    }
-
-    bool mount_procfs(
-        fs::path const& guest_mount_point
-        )
-    {
-        // TODO: add timeout
-        // TODO: check permission
-        std::cout << "Mounting: " << "proc" << " to " << guest_mount_point << std::endl;
-
-        //
-        fs::create_directories( guest_mount_point );
-
-        //
-        if ( ::mount(
-                 "proc",
-                 guest_mount_point.c_str(),
-                 "proc",
-                 MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV,
-                 nullptr    // there is no data
-                 ) != 0 ) {
-            std::cerr << "Failed to mount: " << guest_mount_point << " errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return false;
-        }
-
-        return true;
-    }
-
-    bool mount_tmpfs(
-        fs::path const& guest_mount_point
-        )
-    {
-        // TODO: add timeout
-        // TODO: check permission
-
-        std::cout << "Mounting: " << "/tmp" << " to " << guest_mount_point << std::endl;
-
-        //
-        fs::create_directories( guest_mount_point );
-
-        //
-        if ( ::mount(
-                 "",
-                 guest_mount_point.c_str(),
-                 "tmpfs",
-                 MS_NOEXEC | MS_NODEV,
-                 nullptr    // there is no data
-                 ) != 0 ) {
-            std::cerr << "Failed to mount: " << guest_mount_point << " errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return false;
-        }
-
-        return true;
-    }
-
-    bool umount_directory(
-        fs::path const& guest_mount_point
-        )
-    {
-        std::cout << "Un mounting: " << guest_mount_point << std::endl;
-
-        if ( ::umount2(
-                 guest_mount_point.c_str(),
-                 MNT_DETACH | UMOUNT_NOFOLLOW
-                 ) != 0 ) {
-            std::cerr << "Failed to umount: " << guest_mount_point << " errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return false;
-        }
-
-        return true;
-    }
-
-    auto number_of_files(
-        fs::path const& dir
-        )
-        -> std::size_t
-    {
-        return std::distance(
-            fs::directory_iterator( dir ),
-            fs::directory_iterator()
-            );
-    }
-
-    bool remove_directory_if_empty(
-        fs::path const& guest_mount_point
-        )
-    {
-        std::cout << "removing: " << guest_mount_point << std::endl;
-        auto const count = number_of_files( guest_mount_point );
-
-        if ( count != 0 ) {
-            std::cerr << "Failed to remove: " << guest_mount_point << " There are some files (num = " << count << ") " << std::endl;
-
-            return false;
-        }
-
-        fs::remove_all( guest_mount_point );
-
-        return true;
-    }
-
-    bool cleanup_directory(
-        fs::path const& guest_mount_point
-        )
-    {
-        auto const f = umount_directory( guest_mount_point );
-        auto const s = remove_directory_if_empty( guest_mount_point );
-
-        return f && s;
-    }
-
+    template<typename F = decltype(&remove_directory_if_empty)>
     bool remove_container_directory(
-        fs::path const& guest_dir
+        fs::path const& guest_dir,
+        F const& rm_f = &remove_directory_if_empty
         )
     {
         assert( guest_dir.is_absolute() );
@@ -421,7 +154,7 @@ namespace awaho
                 // TODO: unlink
 
             } else if ( fs::is_directory( p ) ) {
-                remove_container_directory( p );
+                remove_container_directory( p, rm_f );
 
             } else if ( fs::is_regular_file( p ) ) {
                 // TODO: remove
@@ -429,79 +162,7 @@ namespace awaho
             }
         }
 
-        return remove_directory_if_empty( guest_dir );
-    }
-
-    bool change_file_owner(
-        fs::path const& guest_path,
-        linux::user const& user
-        )
-    {
-        std::cout << "chown -> " << guest_path << std::endl;
-        if ( ::chown( guest_path.c_str(), user.user_id(), user.group_id() ) != 0 ) {
-            std::cerr << "Failed to chown. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return false;
-        }
-
-        return true;
-    }
-
-    bool change_directory_owner_rec(
-        fs::path const& guest_dir,
-        linux::user const& user
-        )
-    {
-        auto const begin = fs::directory_iterator( guest_dir );
-        auto const end = fs::directory_iterator();
-
-        change_file_owner( guest_dir, user );
-
-        for( auto&& it : boost::make_iterator_range( begin, end ) ) {
-            auto const& p = it.path();
-            change_file_owner( p, user );
-
-            if ( fs::is_directory( p ) ) {
-                change_directory_owner_rec( p, user );
-            }
-        }
-
-        return true;
-    }
-
-
-    // TODO: exception handling
-    bool remove_node(
-        fs::path const& guest_node_path
-        )
-    {
-        fs::remove( guest_node_path );
-
-        return true;
-    }
-
-    bool make_node(
-        fs::path const& guest_node_path,
-        dev_t const& dev,
-        mode_t const& perm
-        )
-    {
-        if ( fs::exists( guest_node_path ) ) {
-            if ( !remove_node( guest_node_path ) ) {
-                return false;
-            }
-        }
-
-        if ( ::mknod( guest_node_path.c_str(), S_IFCHR, dev ) != 0 ) {
-            std::cerr << "Failed to mknod: " << guest_node_path << " errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return false;
-        }
-
-        if ( ::chmod( guest_node_path.c_str(), perm ) != 0 ) {
-            std::cerr << "Failed to chmod: " << guest_node_path << " errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return false;
-        }
-
-        return true;
+        return rm_f( guest_dir );
     }
 
     static std::tuple<char const*, ::dev_t, ::mode_t> const StandardNodes[] = {
@@ -512,8 +173,9 @@ namespace awaho
         std::make_tuple( "urandom", ::makedev( 1, 9 ), 0644 )
     };
 
-    bool make_standard_nodes(
-        fs::path const& guest_mount_point
+    void make_standard_nodes(
+        fs::path const& guest_mount_point,
+        fs::perms const& prms
         )
     {
         // TODO: add timeout
@@ -522,116 +184,69 @@ namespace awaho
 
         //
         fs::create_directories( guest_mount_point );
+        fs::permissions( guest_mount_point, prms );
 
         //
         for( auto const& n : StandardNodes ) {
-            if ( !make_node( guest_mount_point / std::get<0>( n ), std::get<1>( n ), std::get<2>( n ) ) ) {
-                return false;
-            }
+            make_node( guest_mount_point / std::get<0>( n ), std::get<1>( n ), std::get<2>( n ) );
         }
-
-        return true;
     }
 
     bool remove_standard_nodes(
         fs::path const& guest_mount_point
-        )
+        ) noexcept
     {
         using namespace boost::adaptors;
 
-        //
+        bool result = true;
+
         for( auto const& n : StandardNodes | reversed ) {
-            // TODO: error check
-            fs::remove( guest_mount_point / std::get<0>( n ) );
-        }
+            try {
+                fs::remove( guest_mount_point / std::get<0>( n ) );
 
-        return true;
-    }
-
-    bool remove_symlink(
-        fs::path const& dest
-        )
-    {
-        if ( ::unlink( dest.c_str() ) != 0 ) {
-            std::cerr << "Failed to unlink: " << dest << " errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return false;
-        }
-
-        return true;
-    }
-
-    bool make_symlink(
-        fs::path const& src,
-        fs::path const& dest
-        )
-    {
-        if ( fs::exists( dest ) ) {
-            if ( !remove_symlink( dest ) ) {
-                return false;
+            } catch(...) {
+                // TODO: error handling
+                result = false;
             }
         }
 
-        if ( ::symlink( src.c_str(), dest.c_str() ) != 0 ) {
-            std::cerr << "Failed to symlink: " << dest << " -> " << src << " errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return false;
-        }
-
-        return true;
+        return result;
     }
 
-
-    bool link_io(
+    void link_io(
         fs::path const& guest_proc_dir,
         fs::path const& guest_dev_dir
         )
     {
-        if ( !make_symlink( guest_proc_dir / "self" / "fd" / "0", guest_dev_dir / "stdin" ) ) {
-            return false;
-        }
-
-        if ( !make_symlink( guest_proc_dir / "self" / "fd" / "1", guest_dev_dir / "stdout" ) ) {
-            return false;
-        }
-
-        if ( !make_symlink( guest_proc_dir / "self" / "fd" / "2", guest_dev_dir / "stderr" ) ) {
-            return false;
-        }
-
-        return true;
+        make_symlink( guest_proc_dir / "self" / "fd" / "0", guest_dev_dir / "stdin" );
+        make_symlink( guest_proc_dir / "self" / "fd" / "1", guest_dev_dir / "stdout" );
+        make_symlink( guest_proc_dir / "self" / "fd" / "2", guest_dev_dir / "stderr" );
     }
 
     bool unlink_io(
         fs::path const& guest_dev_dir
-        )
+        ) noexcept
     {
-        if ( !remove_symlink( guest_dev_dir / "stderr" ) ) {
-            return false;
-        }
+        auto const b1 = remove_symlink( guest_dev_dir / "stderr" );
+        auto const b2 = remove_symlink( guest_dev_dir / "stdout" );
+        auto const b3 = remove_symlink( guest_dev_dir / "stdin" );
 
-        if ( !remove_symlink( guest_dev_dir / "stdout" ) ) {
-            return false;
-        }
-
-        if ( !remove_symlink( guest_dev_dir / "stdin" ) ) {
-            return false;
-        }
-
-        return true;
+        return b1 && b2 && b3;
     }
 
+    static auto const guest_proc_path = fs::path( "./proc" );
+    static auto const guest_dev_path = fs::path( "./dev" );
+    static auto const guest_tmp_path = fs::path( "./tmp" );
+
     template<typename MountPoints>
-    void make_jail_environment(
-        fs::path const& host_jail_base_path,
+    void create_files_in_jail(
+        fs::path const& host_container_dir,
         MountPoints const& mount_points,
         linux::user const& user
         )
     {
-        std::cerr << "make_jail_environment" << std::endl;
-
-        fs::create_directories( host_jail_base_path );
-
         // important
-        fs::current_path( host_jail_base_path );
+        fs::current_path( host_container_dir );
 
         // mount system dirs
         for( auto const& host_ro_mount_point : HostReadonlyMountPoints ) {
@@ -640,7 +255,7 @@ namespace awaho
             }
 
             auto const in_container_mount_point = fs::path(".") / host_ro_mount_point;
-            mount_directory( host_ro_mount_point, in_container_mount_point );
+            mount_directory_ro( host_ro_mount_point, in_container_mount_point );
         }
 
         //
@@ -650,24 +265,37 @@ namespace awaho
             }
 
             auto const in_container_mount_point = fs::path(".") / users_mp.guest_path;
-            mount_directory( users_mp.host_path, in_container_mount_point );
+            mount_directory_ro( users_mp.host_path, in_container_mount_point );
             change_directory_owner_rec( in_container_mount_point, user );
         }
-
-        auto const guest_proc_path = fs::path( "./proc" );
-        auto const guest_dev_path = fs::path( "./dev" );
-        auto const guest_tmp_path = fs::path( "./tmp" );
 
         //
         mount_procfs( guest_proc_path );
         mount_tmpfs( guest_tmp_path );
 
         //
-        make_standard_nodes( guest_dev_path );
+        make_standard_nodes( guest_dev_path, fs::perms( 0555 ) );
 
         //
         link_io( guest_proc_path, guest_dev_path );
     }
+
+    template<typename MountPoints>
+    void make_jail_environment(
+        fs::path const& host_container_dir,
+        MountPoints const& mount_points,
+        linux::user const& user
+        )
+    {
+        std::cerr << "make_jail_environment" << std::endl;
+
+        // create container dir
+        fs::create_directories( host_container_dir );
+
+        // create/mount/link files
+        create_files_in_jail( host_container_dir, mount_points, user );
+    }
+
 
     template<typename MountPoints>
     void reset_jail_environment(
@@ -680,10 +308,6 @@ namespace awaho
 
         // important
         fs::current_path( host_container_dir );
-
-        auto const guest_proc_path = fs::path( "./proc" );
-        auto const guest_dev_path = fs::path( "./dev" );
-        auto const guest_tmp_path = fs::path( "./tmp" );
 
         //
         unlink_io( guest_dev_path );
@@ -724,23 +348,33 @@ namespace awaho
 
 
 
-    bool set_limit( int resource, rlim_t lim_soft, rlim_t lim_hard )
+    void set_limit( int resource, rlim_t lim_soft, rlim_t lim_hard )
     {
         assert( lim_hard >= lim_soft);
 
         auto limits = ::rlimit{ lim_soft, lim_hard };
         if ( ::setrlimit( resource, &limits ) == -1 ) {
-            return false;
+            std::stringstream ss;
+            ss << "Failed to set_limit: "
+               << resource << " : " << lim_soft << " / " << lim_hard
+               << " errno=" << errno << " : " << std::strerror( errno );
+            throw std::runtime_error( ss.str() );
         }
-
-        return true;
     }
 
-    bool set_limit( int resource, rlim_t lim )
+    void set_limit( int resource, rlim_t lim )
     {
-        return set_limit( resource, lim, lim );
+        set_limit( resource, lim, lim );
     }
 
+
+    struct arguments_for_jail
+    {
+        fs::path const* const p_host_container_dir;
+        container_options const* const p_opts;
+        linux::user const* const p_user;
+        int* comm;
+    };
 
 
     // this function must be invoked by forked process
@@ -750,17 +384,25 @@ namespace awaho
         linux::user const& user
         )
     {
+        // make environment
+        make_jail_environment(
+            host_container_dir,
+            opts.mount_points,
+            user
+            );
+
         // into jail
         if ( ::chroot( host_container_dir.c_str() ) == -1 ) {
-            std::cerr << "Failed to chroot. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return;
+            std::stringstream ss;
+            ss << "Failed to chroot: "
+               << " errno=" << errno << " : " << std::strerror( errno );
+            throw std::runtime_error( ss.str() );
         }
 
         // move to home
         fs::current_path( opts.in_container_home_path );
 
         // set limits
-        // TODO: error handling
         set_limit( RLIMIT_CORE, opts.limits.core );
         set_limit( RLIMIT_NOFILE, opts.limits.nofile );
         set_limit( RLIMIT_NPROC, opts.limits.nproc );
@@ -769,19 +411,25 @@ namespace awaho
         set_limit( RLIMIT_AS, opts.limits.memory );                         // Memory can be used only memory_limit_bytes [be careful!]
         set_limit( RLIMIT_FSIZE, opts.limits.fsize );
 
+        set_limit( RLIMIT_STACK, opts.stack_size );
+
         // TODO: set umask
 
         // ===
         // change group
         if ( ::setresgid( user.group_id(), user.group_id(), user.group_id() ) != 0 ) {
-            std::cerr << "Failed to setresgid. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return;
+            std::stringstream ss;
+            ss << "Failed to setresgid: "
+               << " errno=" << errno << " : " << std::strerror( errno );
+            throw std::runtime_error( ss.str() );
         }
 
         // change user
         if ( ::setresuid( user.user_id(), user.user_id(), user.user_id() ) != 0 ) {
-            std::cerr << "Failed to setresuid. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return;
+            std::stringstream ss;
+            ss << "Failed to setresuid: "
+               << " errno=" << errno << " : " << std::strerror( errno );
+            throw std::runtime_error( ss.str() );
         }
         // ===
 
@@ -810,6 +458,38 @@ namespace awaho
         std::system("sudo ls -la");
         // execute target program
 
+    }
+
+    // this function must be invoked by forked process
+    int execute_command_in_jail_entry( void* raw_args )
+    {
+        arguments_for_jail const* const args =
+            static_cast<arguments_for_jail const*>( raw_args );
+
+        fs::path const& host_container_dir
+            = *args->p_host_container_dir;
+        container_options const& opts
+            = *args->p_opts;
+        linux::user const& user
+            = *args->p_user;
+        int& comm = *args->comm;
+
+        try {
+            execute_command_in_jail( host_container_dir, opts, user );
+
+        } catch( fs::filesystem_error const& e ) {
+            // TODO: error handling
+            comm = 100;
+
+        } catch( std::exception const& e ) {
+            comm = 200;
+
+        } catch(...) {
+            comm = 300;
+        }
+
+        // if reached to here, maybe error...
+        std::exit( -1 );    // never call destructor of stack objects(Ex. anon_user)
     }
 
     struct executed_result
@@ -864,47 +544,53 @@ namespace awaho
                 );
         };
 
-        // make environment
-        make_jail_environment(
-            host_container_dir,
-            opts.mount_points,
-            *anon_user
-            );
+        std::size_t const stack_for_child_size = opts.stack_size;
+        auto stack_for_child = new std::uint8_t[stack_for_child_size];
 
-        auto const pid = ::fork();
-        if ( pid < 0 ) {
-            std::cerr << "failed to fork" << std::endl;
-            // TODO: error handling
-        }
-        if ( pid == 0 ) {
-            // child process
-            std::cout << "child process" << std::endl;
+        namespace ipc = boost::interprocess;
 
-            // execute_command_in_jail will not return
-            try {
-                execute_command_in_jail(
-                    host_container_dir,
-                    opts,
-                    *anon_user
-                    );
+        try{
+            ipc::mapped_region region( ipc::anonymous_shared_memory( 1000 ) );
 
-            } catch(...) {
-                // TODO: error handling
+            void* ptr = region.get_address();
+            std::size_t s = 1000;
+            auto p_shmem =
+                std::align( alignof(int), sizeof(int), ptr, s );
+            if ( p_shmem == nullptr ) {
+                std::cerr << "Failed to get aligned memory" << std::endl;
+                throw 10;
+            }
+            auto comm = static_cast<int*>( p_shmem );
+
+            *comm = 0;
+
+            //
+            auto args = arguments_for_jail {
+                &host_container_dir,
+                &opts,
+                &*anon_user,
+                comm
+            };
+            // create the process that executes jailed command!
+            pid_t const pid = ::clone(
+                &execute_command_in_jail_entry,
+                stack_for_child + stack_for_child_size,
+                CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | SIGCHLD | CLONE_UNTRACED/* | CLONE_NEWUSER*/,
+                &args
+                );
+            if ( pid == -1 ) {
+                std::cerr << "Clone failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
+                return;
             }
 
-            // std::this_thread::sleep_for(std::chrono::seconds(40));
-
-            // if reached to here, maybe error...
-            std::exit( -1 );    // never call destructor of stack objects(Ex. anon_user)
-
-        } else {
             // parent process
             std::cout << "parent process" << std::endl;
 
             std::promise<boost::optional<executed_result>> p;
             auto f = p.get_future();
 
-            std::thread th( [pid]( std::promise<boost::optional<executed_result>> p ) {
+            std::thread th(
+                [pid]( std::promise<boost::optional<executed_result>> p ) {
                     int child_status;
                     ::rusage usage;
 
@@ -938,7 +624,9 @@ namespace awaho
                 std::move( p )
                 );
 
-            auto const span = std::chrono::seconds{ opts.limits.cpu + 4 };   //
+            // realtime checking apart from cgroup limits
+            // prevent sleep() function running infinite
+            auto const span = std::chrono::seconds{ opts.limits.cpu + 4 };   // +4 is extention...
             if ( f.wait_for( span ) == std::future_status::timeout ) {
                 std::cout << "Timer timeout!" << std::endl;
 
@@ -947,11 +635,13 @@ namespace awaho
                 }
             }
 
+            // wait for result, blocking
             auto const child_result = f.get();
             th.join();
 
             std::cout << "waitpid finished" << std::endl;
 
+            std::cout << "=====> " << *comm << std::endl;
             //
             if ( child_result ) {
                 std::cout << "parent process: child finished / " << std::endl
@@ -959,6 +649,9 @@ namespace awaho
             } else {
                 std::cerr << "parent process: child finished :: failed to waitpid" << std::endl;
             }
+
+        } catch( ipc::interprocess_exception const& ex ) {
+            std::cerr << "ipc error: " << ex.what() << std::endl;
         }
     }
 
@@ -967,18 +660,10 @@ namespace awaho
     {
     }
 
-    struct arguments_for_new_entry
-    {
-        int argc;
-        char** argv;
-    };
 
-    int new_entry( void* raw_args )
-    {
-        std::cout << "new_entry" << std::endl;
 
-        auto args =
-            static_cast<arguments_for_new_entry const*>( raw_args );
+    int execute( int argc, char* argv[] )
+    {
 /*
         if ( ::signal(SIGTERM, sig_handler) == SIG_ERR ) {
             printf("\ncan't catch SIGUSR1\n");
@@ -986,7 +671,7 @@ namespace awaho
 */
         // change process name
         char const process_name[_POSIX_PATH_MAX] = "d=(^o^)=b";
-        std::copy( process_name, process_name + _POSIX_PATH_MAX, args->argv[0] );
+        std::copy( process_name, process_name + _POSIX_PATH_MAX, argv[0] );
 
         //
         auto const cwd = fs::current_path();
@@ -997,6 +682,7 @@ namespace awaho
         auto home_mount_point = mount_point{
             cwd / "test" / "test_home",
             in_container_home_path,
+            0700,
             false
         };
 
@@ -1016,7 +702,9 @@ namespace awaho
 
             in_container_home_path,
             { home_mount_point },
-            limits
+            limits,
+
+            1 * 1024 * 1024     // stack size
         };
 
         try {
@@ -1025,49 +713,10 @@ namespace awaho
         } catch(...) {
             // TODO: error handling
             std::cerr << "exception" << std::endl;
+            return -1;
         }
 
         return 0;
-    }
-
-    int execute( int argc, char* argv[] )
-    {
-        // stack size: 1MiB
-        std::size_t const stack_for_child_size = 1 * 1024 * 1024;
-        std::array<std::uint8_t, stack_for_child_size> stack_for_child = {};
-
-        //
-        auto args = arguments_for_new_entry{
-            argc,
-            argv
-        };
-
-        //
-        pid_t const child_pid = ::clone(
-            &new_entry,
-            stack_for_child.data() + stack_for_child.size(),
-            CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | SIGCHLD | CLONE_UNTRACED/* | CLONE_NEWUSER*/,
-            &args
-            );
-        if ( child_pid == -1 ) {
-            std::cerr << "Clone failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return -1;
-        }
-
-        //
-        int status;
-        if ( ::waitpid( child_pid, &status, 0 ) == -1 ) {
-            std::cerr << "waitpid failed" << std::endl;
-            return -1;
-        }
-
-        std::cout << "%%%%%%%%%% SANDBOX: exit status code: " << status << std::endl;
-        if ( status == 0 ) {
-            return 0;
-
-        } else {
-            return -1;
-        }
     }
 }
 
