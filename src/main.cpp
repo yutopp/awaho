@@ -20,10 +20,12 @@
 #include <errno.h>
 #include <cstring>
 #include <string>
+#include <algorithm>
 
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <boost/range/adaptor/reversed.hpp>
+#include <boost/range/adaptor/indexed.hpp>
 
 #include <boost/scope_exit.hpp>
 #include <boost/optional.hpp>
@@ -31,10 +33,11 @@
 #include <boost/interprocess/anonymous_shared_memory.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 
+#include <boost/asio/io_service.hpp>
+#include <boost/asio/signal_set.hpp>
 
 
 
-#include <random>
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/stat.h>
@@ -45,7 +48,8 @@
 #include <future>
 
 #include "files.hpp"
-#include "linux_user.hpp"
+#include "user.hpp"
+#include "utility.hpp"
 
 namespace awaho
 {
@@ -55,67 +59,117 @@ namespace awaho
     {
         fs::path host_path;
         fs::path guest_path;
-        int permission;
+
         bool is_readonly;
     };
 
-    struct limits_values
+    struct limits_values_t
     {
-        int core;       //
-        int nofile;     // number
-        int nproc;      // number
-        int memlock;    // number
-        int cpu;        // seconds
-        int memory;     // bytes
-        int fsize;      // bytes
+        boost::optional<int> core;       //
+        boost::optional<int> nofile;     // number
+        boost::optional<int> nproc;      // number
+        boost::optional<int> memlock;    // number
+        boost::optional<int> cpu;        // seconds
+        boost::optional<int> memory;     // bytes
+        boost::optional<int> fsize;      // bytes
     };
 
-    struct container_options
+    struct pipe_redirect_t
+    {
+        int host_fd;
+        int guest_fd;
+    };
+
+
+    struct container_options_t
     {
         fs::path host_containers_base_dir;
 
-        fs::path in_container_home_path;
+        fs::path in_container_start_path;       // Ex. "/home/some-user/"
         std::vector<mount_point> mount_points;
-        limits_values limits;
+        limits_values_t limits;
 
         std::size_t stack_size;
+        std::vector<pipe_redirect_t> pipe_redirects;
+
+        std::vector<std::string> commands;
+        std::vector<std::string> envs;
+
+        int result_output_fd;
+        std::string result_output_type;
     };
 
-
-    auto make_random_name()
-        -> std::string
+    std::ostream& operator<<( std::ostream& os, container_options_t const& opts )
     {
-        static char const BaseChars[] = "abcdefghijklmnopqrstuvwxyz1234567890";
+        os << "container_options" << std::endl;
+        os << "  host_containers_base_dir: " << opts.host_containers_base_dir << std::endl
+           << "  in_container_start_path : " << opts.in_container_start_path << std::endl
+            ;
+        os << "  mounts: " << std::endl;
+        for( auto&& im : opts.mount_points | boost::adaptors::indexed( 0 ) ) {
+            os << "    " << im.index() << " ==" << std::endl;
 
-        auto gen = std::mt19937( std::random_device{}() );
-        auto dist = std::uniform_int_distribution<int>{
-            0,
-            sizeof(BaseChars) / sizeof(char) - 1 /*term*/ -1 /*closed-interval*/
-        };
-
-        constexpr auto MaxNameLength = 10;    //28;
-        char random_chars[MaxNameLength+1] = {};
-        for( int i=0; i<MaxNameLength; ++i ) {
-            auto const index = dist(gen);
-            random_chars[i] = BaseChars[index];
+            auto&& mp = im.value();
+            os << "      HOST     : " << mp.host_path << std::endl
+               << "      GUEST    : " << mp.guest_path << std::endl
+               << "      READONLY : " << mp.is_readonly << std::endl
+                ;
         }
 
-        return std::string("_") + random_chars;
-    }
-
-    auto make_anonymous_user()
-        -> boost::optional<linux::user>
-    {
-        // retry 5 times
-        for( int i=0; i<5; ++i ) {
-            linux::user u( make_random_name() );
-            if ( u.valid() ) {
-                return std::move( u );
+        os << "  limits: " << std::endl;
+        {
+            auto const& lim = opts.limits;
+            if ( lim.core ) {
+                os << "    " << "core    : " << *lim.core << std::endl;
+            }
+            if ( lim.nofile ) {
+                os << "    " << "nofile  : " << *lim.nofile << std::endl;
+            }
+            if ( lim.nproc ) {
+                os << "    " << "nproc   : " << *lim.nproc << std::endl;
+            }
+            if ( lim.memlock ) {
+                os << "    " << "memlock : " << *lim.memlock << std::endl;
+            }
+            if ( lim.cpu ) {
+                os << "    " << "cpu     : " << *lim.cpu << std::endl;
+            }
+            if ( lim.memory ) {
+                os << "    " << "memory  : " << *lim.memory << std::endl;
+            }
+            if ( lim.fsize ) {
+                os << "    " << "fsize   : " << *lim.fsize << std::endl;
             }
         }
 
-        return boost::none;
+        os << "  stack_size: " << opts.stack_size << std::endl;
+
+        os << "  pipes: " << std::endl;
+        for( auto&& im : opts.pipe_redirects | boost::adaptors::indexed( 0 ) ) {
+            os << "    " << im.index() << " ==" << std::endl;
+
+            auto&& pr = im.value();
+            os << "      HOST FD  : " << pr.host_fd << std::endl
+               << "      GUEST FD : " << pr.guest_fd << std::endl
+                ;
+        }
+
+        os << "  commands: " << std::endl
+           << "    " << boost::algorithm::join( opts.commands, " " ) << std::endl;
+
+        os << "  envs: " << std::endl;
+        for( auto&& env : opts.envs ) {
+            os << "    " << env << std::endl;
+        }
+
+        os << "  result_output_fd  : " << opts.result_output_fd << std::endl
+           << "  result_output_type: " << opts.result_output_type << std::endl
+            ;
+
+        return os;
     }
+
+
 
 
     // NOTE: be careful order of directories. short to long.
@@ -258,14 +312,27 @@ namespace awaho
             mount_directory_ro( host_ro_mount_point, in_container_mount_point );
         }
 
-        //
+        // mount users dirs
         for( auto const& users_mp : mount_points ) {
             if ( !fs::exists( users_mp.host_path ) ) {
-                continue;
+                std::stringstream ss;
+                ss << "Failed: mount dir you specified is not found. "
+                   << users_mp.host_path;
+                throw std::runtime_error( ss.str() );
             }
 
             auto const in_container_mount_point = fs::path(".") / users_mp.guest_path;
-            mount_directory_ro( users_mp.host_path, in_container_mount_point );
+            unsigned long mountflags = MS_BIND | MS_NOSUID | MS_NODEV;
+            if ( users_mp.is_readonly ) {
+                mountflags |= MS_RDONLY;
+            }
+
+            mount_directory(
+                users_mp.host_path,
+                in_container_mount_point,
+                nullptr,
+                mountflags
+                );
             change_directory_owner_rec( in_container_mount_point, user );
         }
 
@@ -307,7 +374,14 @@ namespace awaho
         using namespace boost::adaptors;
 
         // important
-        fs::current_path( host_container_dir );
+        try {
+            fs::current_path( host_container_dir );
+
+        } catch( fs::filesystem_error const& e ) {
+            std::cerr << "Exception[reset_jail_environment]: "
+                      << e.what() << std::endl;
+            return;
+        }
 
         //
         unlink_io( guest_dev_path );
@@ -342,10 +416,16 @@ namespace awaho
         }
 
         //
-        fs::current_path( host_jail_base_path );
-        remove_container_directory( host_container_dir );
-    }
+        try {
+            fs::current_path( host_jail_base_path );
+            remove_container_directory( host_container_dir );
 
+        } catch( fs::filesystem_error const& e ) {
+            std::cerr << "Exception[reset_jail_environment/last]: "
+                      << e.what() << std::endl;
+            return;
+        }
+    }
 
 
     void set_limit( int resource, rlim_t lim_soft, rlim_t lim_hard )
@@ -371,7 +451,7 @@ namespace awaho
     struct arguments_for_jail
     {
         fs::path const* const p_host_container_dir;
-        container_options const* const p_opts;
+        container_options_t const* const p_opts;
         linux::user const* const p_user;
         int* comm;
     };
@@ -380,10 +460,17 @@ namespace awaho
     // this function must be invoked by forked process
     void execute_command_in_jail(
         fs::path const& host_container_dir,
-        container_options const& opts,
+        container_options_t const& opts,
         linux::user const& user
         )
     {
+        /*
+        std::this_thread::sleep_for(std::chrono::seconds(4));
+
+        std::cout << " SLEEP =============" << std::endl;
+        return;
+        */
+
         // make environment
         make_jail_environment(
             host_container_dir,
@@ -400,24 +487,60 @@ namespace awaho
         }
 
         // move to home
-        fs::current_path( opts.in_container_home_path );
+        fs::current_path( opts.in_container_start_path );
 
         // set limits
-        set_limit( RLIMIT_CORE, opts.limits.core );
-        set_limit( RLIMIT_NOFILE, opts.limits.nofile );
-        set_limit( RLIMIT_NPROC, opts.limits.nproc );
-        set_limit( RLIMIT_MEMLOCK, opts.limits.memlock );
-        set_limit( RLIMIT_CPU, opts.limits.cpu + 1, opts.limits.cpu + 3 );  // CPU can be used only cpu_limit_time(sec)
-        set_limit( RLIMIT_AS, opts.limits.memory );                         // Memory can be used only memory_limit_bytes [be careful!]
-        set_limit( RLIMIT_FSIZE, opts.limits.fsize );
+        if ( opts.limits.core ) {
+            set_limit( RLIMIT_CORE, *opts.limits.core );
+        }
+        if ( opts.limits.nofile ) {
+            set_limit( RLIMIT_NOFILE, *opts.limits.nofile );
+        }
+        if ( opts.limits.nproc ) {
+            set_limit( RLIMIT_NPROC, *opts.limits.nproc );
+        }
+        if ( opts.limits.memlock ) {
+            set_limit( RLIMIT_MEMLOCK, *opts.limits.memlock );
+        }
+        if ( opts.limits.cpu ) {
+            // CPU can be used only cpu_limit_time(sec)
+            set_limit( RLIMIT_CPU, *opts.limits.cpu, *opts.limits.cpu + 3 );
+        }
+        if ( opts.limits.memory ) {
+            // Memory can be used only memory_limit_bytes [be careful!]
+            set_limit( RLIMIT_AS, *opts.limits.memory, *opts.limits.memory * 1.2 );
+        }
+        if ( opts.limits.fsize ) {
+            set_limit( RLIMIT_FSIZE, *opts.limits.fsize );
+        }
 
         set_limit( RLIMIT_STACK, opts.stack_size );
 
         // TODO: set umask
 
+        std::system("ls -la /proc/self/fd");
+
+        // redirect: pipes[debug]
+        for( auto const& pr : opts.pipe_redirects ) {
+            std::cout << "==> host fd: " << pr.host_fd
+                      << " will recieve data of child fd: " << pr.guest_fd
+                      << std::endl;
+        }
+
+        // redirect: pipes
+        for( auto const& pr : opts.pipe_redirects ) {
+            if ( ::dup2( pr.host_fd, pr.guest_fd ) == -1 ) {
+                std::stringstream ss;
+                ss << "Failed to dup2: "
+                   << " errno=" << errno << " : " << std::strerror( errno );
+                throw std::runtime_error( ss.str() );
+            }
+            ::close( pr.host_fd );
+        }
+
         // ===
         // change group
-        if ( ::setresgid( user.group_id(), user.group_id(), user.group_id() ) != 0 ) {
+        if ( ::setresgid( user.group_id(), user.group_id(), user.group_id() ) == -1 ) {
             std::stringstream ss;
             ss << "Failed to setresgid: "
                << " errno=" << errno << " : " << std::strerror( errno );
@@ -425,7 +548,7 @@ namespace awaho
         }
 
         // change user
-        if ( ::setresuid( user.user_id(), user.user_id(), user.user_id() ) != 0 ) {
+        if ( ::setresuid( user.user_id(), user.user_id(), user.user_id() ) == -1 ) {
             std::stringstream ss;
             ss << "Failed to setresuid: "
                << " errno=" << errno << " : " << std::strerror( errno );
@@ -436,6 +559,10 @@ namespace awaho
         //
         std::system("pwd");
         std::system("ls -la");
+
+        // std::system("rm /etc/yutopp_test.txt");
+
+        std::this_thread::sleep_for(std::chrono::seconds(4));
 
         std::system("ls -la /");
         std::system("cd /; ls -la ../");
@@ -458,6 +585,8 @@ namespace awaho
         std::system("sudo ls -la");
         // execute target program
 
+        std::system("touch bo.txt");
+
     }
 
     // this function must be invoked by forked process
@@ -468,7 +597,7 @@ namespace awaho
 
         fs::path const& host_container_dir
             = *args->p_host_container_dir;
-        container_options const& opts
+        container_options_t const& opts
             = *args->p_opts;
         linux::user const& user
             = *args->p_user;
@@ -476,13 +605,16 @@ namespace awaho
 
         try {
             execute_command_in_jail( host_container_dir, opts, user );
+            // after this, stdio should not be used, because they may be redirected
 
         } catch( fs::filesystem_error const& e ) {
             // TODO: error handling
             comm = 100;
+            // std::cerr << e.what() << std::endl;
 
         } catch( std::exception const& e ) {
             comm = 200;
+            // std::cerr << e.what() << std::endl;
 
         } catch(...) {
             comm = 300;
@@ -519,10 +651,14 @@ namespace awaho
         return os;
     }
 
+
+
     // TODO: exception handling
-    void run_in_container( container_options const& opts )
+    void run_in_container( container_options_t const& opts )
     {
         std::cout << "Host base dir: " << opts.host_containers_base_dir << std::endl;
+
+        expect_root();
 
         // make user
         auto const anon_user = make_anonymous_user();
@@ -624,14 +760,21 @@ namespace awaho
                 std::move( p )
                 );
 
-            // realtime checking apart from cgroup limits
-            // prevent sleep() function running infinite
-            auto const span = std::chrono::seconds{ opts.limits.cpu + 4 };   // +4 is extention...
-            if ( f.wait_for( span ) == std::future_status::timeout ) {
-                std::cout << "Timer timeout!" << std::endl;
 
-                if ( ::kill( pid, SIGKILL ) == -1 ) {
-                    std::cerr << "Failed to kill child. errno=" << errno << " : " << std::strerror(errno) << std::endl;
+            if ( opts.limits.cpu ) {
+                // realtime checking apart from cgroup limits
+                // prevent sleep() function running infinite
+                // +4 is extention...
+                auto const span
+                    = std::chrono::seconds{ *opts.limits.cpu + 4 };
+                if ( f.wait_for( span ) == std::future_status::timeout ) {
+                    std::cout << "Timer timeout!" << std::endl;
+
+                    if ( ::kill( pid, SIGKILL ) == -1 ) {
+                        std::cerr << "Failed to kill child."
+                                  << " errno=" << errno
+                                  << " : " << std::strerror(errno) << std::endl;
+                    }
                 }
             }
 
@@ -656,69 +799,35 @@ namespace awaho
     }
 
 
-    void sig_handler(int signum)
+    void sig_handler(
+        boost::system::error_code const& error,
+        int signal_number
+        )
     {
+        std::cout << "!!!!! sig hand: " << signal_number << std::endl;
     }
 
+    int execute( container_options_t const& opts ) noexcept
+    try {
+        boost::asio::io_service io_service;
+        boost::asio::signal_set signals( io_service, SIGINT, SIGTERM );
+        signals.async_wait( sig_handler );
 
-
-    int execute( int argc, char* argv[] )
-    {
-/*
-        if ( ::signal(SIGTERM, sig_handler) == SIG_ERR ) {
-            printf("\ncan't catch SIGUSR1\n");
-        }
-*/
-        // change process name
-        char const process_name[_POSIX_PATH_MAX] = "d=(^o^)=b";
-        std::copy( process_name, process_name + _POSIX_PATH_MAX, argv[0] );
-
-        //
-        auto const cwd = fs::current_path();
-        auto const host_jail_base_dir = cwd / "containers_tmp";
-
-        //
-        auto const in_container_home_path = "/home/torigoya";
-        auto home_mount_point = mount_point{
-            cwd / "test" / "test_home",
-            in_container_home_path,
-            0700,
-            false
-        };
-
-        //
-        auto const limits = limits_values{
-            0,
-            512,
-            30,
-            1024,
-            2,
-            1 * 1024 * 1024 * 1024,
-            2 * 1024 * 1024,
-        };
-
-        auto c_opts = container_options{
-            host_jail_base_dir,
-
-            in_container_home_path,
-            { home_mount_point },
-            limits,
-
-            1 * 1024 * 1024     // stack size
-        };
-
-        try {
-            run_in_container( c_opts );
-
-        } catch(...) {
-            // TODO: error handling
-            std::cerr << "exception" << std::endl;
-            return -1;
-        }
+        std::cout << opts << std::endl;
+        run_in_container( opts );
 
         return 0;
+
+    } catch( std::exception const& e ) {
+        std::cerr << "Exception[execute]: " << e.what() << std::endl;
+        return -1;
+
+    } catch(...) {
+        std::cerr << "Unexpected exception[execute]" << std::endl;
+        return -2;
     }
-}
+
+} // namespace awaho
 
 
 int main( int argc, char* argv[] )
@@ -728,13 +837,28 @@ int main( int argc, char* argv[] )
     // Generic options
     po::options_description generic( "Generic options" );
     generic.add_options()
-        ( "version,v", "print version string" )
+        ( "base-host-path", po::value<std::string>(), "sandbox path will be $base-host-path/$id" )
+
+        ( "start-guest-path", po::value<std::string>(), "cd to $start-guest-path in container at first (Ex. /home/some_user)" )
+        ( "mount", po::value<std::vector<std::string>>(), "host:guest(:rw?)" )
+
+        ( "core", po::value<int>(), "setrlimit core" )
+        ( "nofile", po::value<int>(), "setrlimit nofile" )
+        ( "nproc", po::value<int>(), "setrlimit nproc" )
+        ( "memlock", po::value<int>(), "setrlimit memlock" )
+        ( "cpu", po::value<int>(), "setrlimit cpu" )
+        ( "memory", po::value<int>(), "setrlimit memory" )
+        ( "fsize", po::value<int>(), "setrlimit fsize" )
+
+        ( "stack-size", po::value<std::size_t>(), "stack size" )
+        ( "pipe", po::value<std::vector<std::string>>(), "host-fd:guest-fd" )
+
         ( "help", "produce help message" )
         ;
 
     po::options_description hidden( "Hidden options" );
     hidden.add_options()
-        ( "argv-in-container", po::value<std::vector<std::string>>(), "input file" )
+        ( "argv-in-container", po::value<std::vector<std::string>>(), "argv" )
         ;
 
     po::options_description cmdline_options;
@@ -757,11 +881,150 @@ int main( int argc, char* argv[] )
             );
         po::notify( vm );
 
+        //
+        if ( vm.count( "help" ) ) {
+            std::cout << cmdline_options << std::endl;
+            return 0;
+        }
+
+        // default option
+        auto c_opts = awaho::container_options_t{
+            "/tmp/containers_tmp",
+
+            "/",                        // start path in container
+            {},                         // mounts
+            awaho::limits_values_t{},   // no limitation(use system default)
+
+            2 * 1024 * 1024,            // stack size
+            {},                         // no pipe redirect
+
+            { "/bin/bash" },            // default comands
+            {},                         // default envs
+
+            1,                          // default fd gets result (stdout)
+            "json"                      // default result format
+        };
+
+        if ( vm.count( "base-host-path" ) ) {
+            auto const& base_host_path =
+                vm["base-host-path"].as<std::string>();
+
+            c_opts.host_containers_base_dir = base_host_path;
+        }
+
+        if ( vm.count( "start-guest-path" ) ) {
+            auto const& start_guest_path =
+                vm["start-guest-path"].as<std::string>();
+
+            c_opts.in_container_start_path = start_guest_path;
+        }
+
+        if ( vm.count( "mount" ) ) {
+            auto const& mounts =
+                vm["mount"].as<std::vector<std::string>>();
+            for( auto&& v : mounts ) {
+                std::vector<std::string> d;
+                boost::algorithm::split( d, v, boost::is_any_of(":") );
+
+                if ( d.size() < 2 ) {
+                    throw std::runtime_error( "invalid mount option" ); // TODO: fix
+                }
+
+                auto mp = awaho::mount_point{
+                    d[0],   // host
+                    d[1],   // guest
+                    true    // readonly(default)
+                };
+
+                if ( d.size() >= 3 ) {
+                    if ( d[2] == "rw" ) {
+                        mp.is_readonly = false;
+
+                    } else if ( d[2] == "ro" ) {
+                        mp.is_readonly = true;
+
+                    } else {
+                        throw std::runtime_error( "unknown mount option" ); // TODO: fix
+                    }
+                }
+
+                c_opts.mount_points.emplace_back( std::move( mp ) );
+            }
+        }
+
+        {
+            if ( vm.count( "core" ) ) {
+                c_opts.limits.core
+                    = vm["core"].as<std::size_t>();
+            }
+
+            if ( vm.count( "nofile" ) ) {
+                c_opts.limits.nofile
+                    = vm["nofile"].as<std::size_t>();
+            }
+
+            if ( vm.count( "nproc" ) ) {
+                c_opts.limits.nproc
+                    = vm["nproc"].as<std::size_t>();
+            }
+
+            if ( vm.count( "memlock" ) ) {
+                c_opts.limits.memlock
+                    = vm["memlock"].as<std::size_t>();
+            }
+
+            if ( vm.count( "cpu" ) ) {
+                c_opts.limits.cpu
+                    = vm["cpu"].as<std::size_t>();
+            }
+
+            if ( vm.count( "memory" ) ) {
+                c_opts.limits.memory
+                    = vm["memory"].as<std::size_t>();
+            }
+
+            if ( vm.count( "fsize" ) ) {
+                c_opts.limits.fsize
+                    = vm["fsize"].as<std::size_t>();
+            }
+        }
+
+        if ( vm.count( "stack-size" ) ) {
+            auto const& stack_size =
+                vm["stack-size"].as<std::size_t>();
+
+            c_opts.stack_size = stack_size;
+        }
+
+        if ( vm.count( "pipe" ) ) {
+            auto const& pipes =
+                vm["pipe"].as<std::vector<std::string>>();
+            for( auto&& v : pipes ) {
+                std::vector<std::string> d;
+                boost::algorithm::split( d, v, boost::is_any_of(":") );
+
+                if ( d.size() != 2 ) {
+                    throw std::runtime_error( "invalid pipe option" ); // TODO: fix
+                }
+
+                auto pr = awaho::pipe_redirect_t{
+                    boost::lexical_cast<int>( boost::trim_copy( d[0] ) ),   // host
+                    boost::lexical_cast<int>( boost::trim_copy( d[1] ) ),   // guest
+                };
+
+                c_opts.pipe_redirects.emplace_back( std::move( pr ) );
+            }
+        }
+
+        return awaho::execute( c_opts );
+
     } catch( std::exception const& e ) {
         std::cerr << "Exception: " << std::endl
                   << e.what() << std::endl;
-        return -1;
-    }
+        return -10;
 
-    return awaho::execute( argc, argv );
+    } catch(...) {
+        std::cerr << "Unexpected exception: " << std::endl;
+        return -20;
+    }
 }

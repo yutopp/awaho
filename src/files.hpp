@@ -25,15 +25,16 @@ namespace awaho
 {
     namespace fs = boost::filesystem;
 
-    // throw exception if failed
-    void mount_directory_ro(
+    void mount_directory(
         fs::path const& host_mount_point,
-        fs::path const& guest_mount_point
+        fs::path const& guest_mount_point,
+        char const* const filesystemtype,
+        unsigned long const mountflags
         )
     {
         // TODO: add timeout
         std::cout << "Mounting: " << host_mount_point << " to " << guest_mount_point << std::endl;
-
+/*
         if ( !fs::is_directory( host_mount_point ) ) {
             std::stringstream ss;
             ss << "Failed to mount: "
@@ -48,15 +49,15 @@ namespace awaho
                << guest_mount_point << " is already exists";
             throw std::runtime_error( ss.str() );
         }
-
+*/
         fs::create_directories( guest_mount_point );    // throw exception if failed
 
         //
         if ( ::mount(
                  host_mount_point.c_str(),
                  guest_mount_point.c_str(),
-                 nullptr,   // MS_BIND ignores this option
-                 MS_BIND | MS_RDONLY | MS_NOSUID | MS_NODEV,
+                 filesystemtype,
+                 mountflags,
                  nullptr    // there is no data
                  ) != 0 ) {
             std::stringstream ss;
@@ -64,48 +65,40 @@ namespace awaho
                << " errno=" << errno << " : " << std::strerror( errno );
             throw std::runtime_error( ss.str() );
         }
+    }
+
+    // throw exception if failed
+    void mount_directory_ro(
+        fs::path const& host_mount_point,
+        fs::path const& guest_mount_point
+        )
+    {
+        mount_directory(
+            host_mount_point,
+            guest_mount_point,
+            nullptr,    // MS_BIND ignores this option
+            MS_BIND | MS_RDONLY | MS_NOSUID | MS_NODEV
+            );
     }
 
     void mount_procfs( fs::path const& guest_mount_point )
     {
-        // TODO: add timeout
-        std::cout << "Mounting: " << "proc" << " to " << guest_mount_point << std::endl;
-
-        fs::create_directories( guest_mount_point );
-
-        if ( ::mount(
-                 "proc",
-                 guest_mount_point.c_str(),
-                 "proc",
-                 MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV,
-                 nullptr    // there is no data
-                 ) != 0 ) {
-            std::stringstream ss;
-            ss << "Failed to mount: " << guest_mount_point
-               << " errno=" << errno << " : " << std::strerror( errno );
-            throw std::runtime_error( ss.str() );
-        }
+        mount_directory(
+            "proc",
+            guest_mount_point,
+            "proc",
+            MS_RDONLY | MS_NOSUID | MS_NOEXEC | MS_NODEV
+            );
     }
 
     void mount_tmpfs( fs::path const& guest_mount_point )
     {
-        // TODO: add timeout
-        std::cout << "Mounting: " << "/tmp" << " to " << guest_mount_point << std::endl;
-
-        fs::create_directories( guest_mount_point );
-
-        if ( ::mount(
-                 "",
-                 guest_mount_point.c_str(),
-                 "tmpfs",
-                 MS_NOEXEC | MS_NODEV,
-                 nullptr    // there is no data
-                 ) != 0 ) {
-            std::stringstream ss;
-            ss << "Failed to mount: " << guest_mount_point
-               << " errno=" << errno << " : " << std::strerror( errno );
-            throw std::runtime_error( ss.str() );
-        }
+        mount_directory(
+            "",
+            guest_mount_point,
+            "tmpfs",
+            MS_NOEXEC | MS_NODEV
+            );
     }
 
     bool umount_directory(
