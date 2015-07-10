@@ -21,6 +21,7 @@
 #include <cstring>
 #include <string>
 #include <algorithm>
+#include <iterator>
 
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
@@ -36,7 +37,8 @@
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/signal_set.hpp>
 
-
+#include <boost/iostreams/stream.hpp>
+#include <boost/iostreams/device/file_descriptor.hpp>
 
 #include <sys/resource.h>
 #include <sys/time.h>
@@ -50,6 +52,9 @@
 #include "files.hpp"
 #include "user.hpp"
 #include "utility.hpp"
+
+#include "ext/picojson.h"
+
 
 namespace awaho
 {
@@ -79,7 +84,6 @@ namespace awaho
         int host_fd;
         int guest_fd;
     };
-
 
     struct container_options_t
     {
@@ -562,7 +566,7 @@ namespace awaho
 
         // std::system("rm /etc/yutopp_test.txt");
 
-        std::this_thread::sleep_for(std::chrono::seconds(4));
+        // std::this_thread::sleep_for(std::chrono::seconds(4));
 
         std::system("ls -la /");
         std::system("cd /; ls -la ../");
@@ -659,6 +663,11 @@ namespace awaho
         std::cout << "Host base dir: " << opts.host_containers_base_dir << std::endl;
 
         expect_root();
+
+        // make the special pipe close when exec
+        if ( opts.result_output_fd > 2 ) {
+            ::fcntl( opts.result_output_fd, F_SETFD, FD_CLOEXEC );
+        }
 
         // make user
         auto const anon_user = make_anonymous_user();
@@ -789,6 +798,39 @@ namespace awaho
             if ( child_result ) {
                 std::cout << "parent process: child finished / " << std::endl
                           << *child_result << std::endl;
+
+
+                namespace bio = boost::iostreams;
+                auto const close_flag = ( opts.result_output_fd > 2 )
+                    ? bio::file_descriptor_flags::close_handle
+                    : bio::file_descriptor_flags::never_close_handle
+                    ;
+                bio::stream<bio::file_descriptor_sink> ofs( opts.result_output_fd, close_flag );
+                if ( !ofs ) {
+                    std::cerr << "parent process: child finished :: failed to create result" << std::endl;
+                }
+
+                if ( opts.result_output_type == "json" ) {
+                    picojson::value::object obj{
+                        { "exited", picojson::value( child_result->exited ) },
+                        { "exitStatus", picojson::value( static_cast<double>( child_result->exit_status ) ) },
+                        { "signaled", picojson::value( child_result->signaled ) },
+                        { "signal", picojson::value( static_cast<double>( child_result->signal ) ) },
+
+                        { "userTimeMicroSec", picojson::value( child_result->user_time_micro_sec ) },
+                        { "systemTimeMicroSec", picojson::value( child_result->system_time_micro_sec ) },
+                        { "cpuTimeMicroSec", picojson::value( child_result->cpu_time_micro_sec ) },
+                        { "usedMemoryBytes", picojson::value( static_cast<double>( child_result->used_memory_bytes ) ) },
+                    };
+                    picojson::value root( obj );
+
+                    root.serialize( std::ostream_iterator<char>( ofs ) );
+
+                } else {
+                    std::cerr << "Error: type " << opts.result_output_type << " is not supported" << std::endl;
+
+                }
+
             } else {
                 std::cerr << "parent process: child finished :: failed to waitpid" << std::endl;
             }
@@ -852,6 +894,9 @@ int main( int argc, char* argv[] )
 
         ( "stack-size", po::value<std::size_t>(), "stack size" )
         ( "pipe", po::value<std::vector<std::string>>(), "host-fd:guest-fd" )
+
+        ( "result-fd", po::value<int>(), "fd can get detail of result" )
+        ( "result-type", po::value<std::string>(), "type of result [json]" )
 
         ( "help", "produce help message" )
         ;
@@ -1014,6 +1059,16 @@ int main( int argc, char* argv[] )
 
                 c_opts.pipe_redirects.emplace_back( std::move( pr ) );
             }
+        }
+
+        if ( vm.count( "result-fd" ) ) {
+            c_opts.result_output_fd =
+                vm["result-fd"].as<int>();
+        }
+
+        if ( vm.count( "result-type" ) ) {
+            c_opts.result_output_type =
+                vm["result-type"].as<std::string>();
         }
 
         return awaho::execute( c_opts );

@@ -59,7 +59,7 @@ namespace awaho
                  filesystemtype,
                  mountflags,
                  nullptr    // there is no data
-                 ) != 0 ) {
+                 ) == -1 ) {
             std::stringstream ss;
             ss << "Failed to mount: " << guest_mount_point
                << " errno=" << errno << " : " << std::strerror( errno );
