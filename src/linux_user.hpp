@@ -34,8 +34,8 @@ namespace awaho
                 , is_user_created_( false )
             {
                 auto const stat = std::system( ("useradd --no-create-home " + name_).c_str() );
-                if ( stat != 0 ) {
-                    // return;
+                if ( stat == -1 || !WIFEXITED(stat) || WEXITSTATUS(stat) != 0 ) {
+                    return;
                 }
                 is_user_created_ = true;
 
