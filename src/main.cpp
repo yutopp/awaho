@@ -276,9 +276,9 @@ namespace awaho
         fs::path const& guest_dev_dir
         )
     {
-        make_symlink( guest_proc_dir / "self" / "fd" / "0", guest_dev_dir / "stdin" );
-        make_symlink( guest_proc_dir / "self" / "fd" / "1", guest_dev_dir / "stdout" );
-        make_symlink( guest_proc_dir / "self" / "fd" / "2", guest_dev_dir / "stderr" );
+        make_symlink( guest_proc_dir / "self/fd/0", guest_dev_dir / "stdin" );
+        make_symlink( guest_proc_dir / "self/fd/1", guest_dev_dir / "stdout" );
+        make_symlink( guest_proc_dir / "self/fd/2", guest_dev_dir / "stderr" );
     }
 
     bool unlink_io(
@@ -452,13 +452,6 @@ namespace awaho
     }
 
 
-    struct arguments_for_jail
-    {
-        fs::path const* const p_host_container_dir;
-        container_options_t const* const p_opts;
-        linux::user const* const p_user;
-        int* comm;
-    };
 
 
     // this function must be invoked by forked process
@@ -591,7 +584,26 @@ namespace awaho
 
         std::system("touch bo.txt");
 
+        std::system("ln -s /proc proc");
+        std::system("ln /lib/yutopp.lib kuso");
     }
+
+
+    struct comm_info_t
+    {
+        static constexpr std::size_t BufferLength = 2000;
+
+        int error_status;
+        char message[BufferLength];
+    };
+
+    struct arguments_for_jail
+    {
+        fs::path const* const p_host_container_dir;
+        container_options_t const* const p_opts;
+        linux::user const* const p_user;
+        comm_info_t* comm_info;
+    };
 
     // this function must be invoked by forked process
     int execute_command_in_jail_entry( void* raw_args )
@@ -605,7 +617,7 @@ namespace awaho
             = *args->p_opts;
         linux::user const& user
             = *args->p_user;
-        int& comm = *args->comm;
+        comm_info_t& comm_info = *args->comm_info;
 
         try {
             execute_command_in_jail( host_container_dir, opts, user );
@@ -613,15 +625,20 @@ namespace awaho
 
         } catch( fs::filesystem_error const& e ) {
             // TODO: error handling
-            comm = 100;
-            // std::cerr << e.what() << std::endl;
+            comm_info.error_status = 100;
+            std::strncpy( comm_info.message, e.what(), comm_info_t::BufferLength - 1 );
 
         } catch( std::exception const& e ) {
-            comm = 200;
-            // std::cerr << e.what() << std::endl;
+            comm_info.error_status = 200;
+            std::strncpy( comm_info.message, e.what(), comm_info_t::BufferLength - 1 );
 
         } catch(...) {
-            comm = 300;
+            comm_info.error_status = 300;
+            std::strncpy(
+                comm_info.message,
+                "Unexpected exception[execute_command_in_jail_entry]",
+                comm_info_t::BufferLength - 1
+                );
         }
 
         // if reached to here, maybe error...
@@ -666,14 +683,16 @@ namespace awaho
 
         // make the special pipe close when exec
         if ( opts.result_output_fd > 2 ) {
-            ::fcntl( opts.result_output_fd, F_SETFD, FD_CLOEXEC );
+            if ( ::fcntl( opts.result_output_fd, F_SETFD, FD_CLOEXEC ) == -1 ) {
+                // throw
+            }
         }
 
         // make user
         auto const anon_user = make_anonymous_user();
         if ( anon_user == boost::none ) {
             std::cerr << "Failed to create user" << std::endl;
-            return;
+            // throw
         }
         assert( anon_user->valid() );
 
@@ -695,26 +714,27 @@ namespace awaho
         namespace ipc = boost::interprocess;
 
         try{
-            ipc::mapped_region region( ipc::anonymous_shared_memory( 1000 ) );
+            constexpr auto CommBufferSize = 2048;
 
-            void* ptr = region.get_address();
-            std::size_t s = 1000;
-            auto p_shmem =
-                std::align( alignof(int), sizeof(int), ptr, s );
-            if ( p_shmem == nullptr ) {
-                std::cerr << "Failed to get aligned memory" << std::endl;
-                throw 10;
+            // create shared buffer (comm_info)
+            ipc::mapped_region region( ipc::anonymous_shared_memory( CommBufferSize ) );
+            void* const ptr = region.get_address();
+            auto const offset =
+                alignof(comm_info_t) - ( reinterpret_cast<std::uintptr_t>( ptr ) % alignof(comm_info_t) );
+            auto const free_size = CommBufferSize - offset;
+            if ( free_size < sizeof(comm_info_t) ) {
+                // throw
             }
-            auto comm = static_cast<int*>( p_shmem );
 
-            *comm = 0;
+            void* aligned_ptr = static_cast<void*>( static_cast<char*>( ptr ) + offset );
+            auto comm_info_p = new(aligned_ptr) comm_info_t{};  // value initialize
 
             //
             auto args = arguments_for_jail {
                 &host_container_dir,
                 &opts,
                 &*anon_user,
-                comm
+                comm_info_p
             };
             // create the process that executes jailed command!
             pid_t const pid = ::clone(
@@ -793,12 +813,10 @@ namespace awaho
 
             std::cout << "waitpid finished" << std::endl;
 
-            std::cout << "=====> " << *comm << std::endl;
             //
             if ( child_result ) {
                 std::cout << "parent process: child finished / " << std::endl
                           << *child_result << std::endl;
-
 
                 namespace bio = boost::iostreams;
                 auto const close_flag = ( opts.result_output_fd > 2 )
@@ -834,6 +852,13 @@ namespace awaho
             } else {
                 std::cerr << "parent process: child finished :: failed to waitpid" << std::endl;
             }
+
+            // comm check
+            std::cout << std::endl
+                      << "comm: " << comm_info_p->error_status << std::endl
+                      << "mes : " << comm_info_p->message << std::endl;
+
+
 
         } catch( ipc::interprocess_exception const& ex ) {
             std::cerr << "ipc error: " << ex.what() << std::endl;

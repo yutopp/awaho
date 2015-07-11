@@ -25,7 +25,7 @@ namespace awaho
 {
     namespace fs = boost::filesystem;
 
-    void mount_directory(
+    void mount(
         fs::path const& host_mount_point,
         fs::path const& guest_mount_point,
         char const* const filesystemtype,
@@ -34,22 +34,7 @@ namespace awaho
     {
         // TODO: add timeout
         std::cout << "Mounting: " << host_mount_point << " to " << guest_mount_point << std::endl;
-/*
-        if ( !fs::is_directory( host_mount_point ) ) {
-            std::stringstream ss;
-            ss << "Failed to mount: "
-               << host_mount_point << " is not directory";
-            throw std::runtime_error( ss.str() );
-        }
 
-        //
-        if ( fs::is_directory( guest_mount_point ) ) {
-            std::stringstream ss;
-            ss << "Failed to mount: GUEST "
-               << guest_mount_point << " is already exists";
-            throw std::runtime_error( ss.str() );
-        }
-*/
         fs::create_directories( guest_mount_point );    // throw exception if failed
 
         //
@@ -65,6 +50,38 @@ namespace awaho
                << " errno=" << errno << " : " << std::strerror( errno );
             throw std::runtime_error( ss.str() );
         }
+    }
+
+    void mount_directory(
+        fs::path const& host_mount_point,
+        fs::path const& guest_mount_point,
+        char const* const filesystemtype,
+        unsigned long const mountflags
+        )
+    {
+        if ( !host_mount_point.is_absolute() ) {
+            std::stringstream ss;
+            ss << "Failed to mount: "
+               << host_mount_point << " must be ablosute path";
+            throw std::runtime_error( ss.str() );
+        }
+
+        if ( !fs::is_directory( host_mount_point ) ) {
+            std::stringstream ss;
+            ss << "Failed to mount: "
+               << host_mount_point << " is not directory";
+            throw std::runtime_error( ss.str() );
+        }
+
+        //
+        if ( fs::exists( guest_mount_point ) ) {
+            std::stringstream ss;
+            ss << "Failed to mount: GUEST "
+               << guest_mount_point << " is already exists";
+            throw std::runtime_error( ss.str() );
+        }
+
+        mount( host_mount_point, guest_mount_point, filesystemtype, mountflags );
     }
 
     // throw exception if failed
@@ -83,7 +100,7 @@ namespace awaho
 
     void mount_procfs( fs::path const& guest_mount_point )
     {
-        mount_directory(
+        mount(
             "proc",
             guest_mount_point,
             "proc",
@@ -93,7 +110,7 @@ namespace awaho
 
     void mount_tmpfs( fs::path const& guest_mount_point )
     {
-        mount_directory(
+        mount(
             "",
             guest_mount_point,
             "tmpfs",
@@ -207,7 +224,7 @@ namespace awaho
         for( auto&& it : boost::make_iterator_range( begin, end ) ) {
             auto const& p = it.path();
 
-            if ( fs::is_directory( p ) ) {
+            if ( fs::is_directory( p ) && !fs::is_symlink( p ) ) {
                 change_directory_owner_rec( p, user );
             } else {
                 change_file_owner( p, user );
