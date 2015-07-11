@@ -68,6 +68,12 @@ namespace awaho
         bool is_readonly;
     };
 
+    struct copy_point
+    {
+        fs::path host_path;
+        fs::path guest_path;
+    };
+
     struct limits_values_t
     {
         boost::optional<int> core;       //
@@ -91,6 +97,7 @@ namespace awaho
 
         fs::path in_container_start_path;       // Ex. "/home/some-user/"
         std::vector<mount_point> mount_points;
+        std::vector<copy_point> copy_points;
         limits_values_t limits;
 
         std::size_t stack_size;
@@ -117,6 +124,16 @@ namespace awaho
             os << "      HOST     : " << mp.host_path << std::endl
                << "      GUEST    : " << mp.guest_path << std::endl
                << "      READONLY : " << mp.is_readonly << std::endl
+                ;
+        }
+
+        os << "  copies: " << std::endl;
+        for( auto&& im : opts.copy_points | boost::adaptors::indexed( 0 ) ) {
+            os << "    " << im.index() << " ==" << std::endl;
+
+            auto&& cp = im.value();
+            os << "      HOST     : " << cp.host_path << std::endl
+               << "      GUEST    : " << cp.guest_path << std::endl
                 ;
         }
 
@@ -585,7 +602,7 @@ namespace awaho
         std::system("touch bo.txt");
 
         std::system("ln -s /proc proc");
-        std::system("ln /lib/yutopp.lib kuso");
+        std::system("ln /lib/yutopp.lib beautiful_something");
     }
 
 
@@ -908,6 +925,7 @@ int main( int argc, char* argv[] )
 
         ( "start-guest-path", po::value<std::string>(), "cd to $start-guest-path in container at first (Ex. /home/some_user)" )
         ( "mount", po::value<std::vector<std::string>>(), "host:guest(:rw?)" )
+        ( "copy", po::value<std::vector<std::string>>(), "host:guest" )
 
         ( "core", po::value<int>(), "setrlimit core" )
         ( "nofile", po::value<int>(), "setrlimit nofile" )
@@ -963,6 +981,7 @@ int main( int argc, char* argv[] )
 
             "/",                        // start path in container
             {},                         // mounts
+            {},                         // copies
             awaho::limits_values_t{},   // no limitation(use system default)
 
             2 * 1024 * 1024,            // stack size
@@ -1019,6 +1038,26 @@ int main( int argc, char* argv[] )
                 }
 
                 c_opts.mount_points.emplace_back( std::move( mp ) );
+            }
+        }
+
+        if ( vm.count( "copy" ) ) {
+            auto const& copies =
+                vm["copy"].as<std::vector<std::string>>();
+            for( auto&& v : copies ) {
+                std::vector<std::string> d;
+                boost::algorithm::split( d, v, boost::is_any_of(":") );
+
+                if ( d.size() < 2 ) {
+                    throw std::runtime_error( "invalid copy option" ); // TODO: fix
+                }
+
+                auto cp = awaho::copy_point{
+                    d[0],   // host
+                    d[1],   // guest
+                };
+
+                c_opts.copy_points.emplace_back( std::move( cp ) );
             }
         }
 
