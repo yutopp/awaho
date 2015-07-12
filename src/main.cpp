@@ -1016,7 +1016,7 @@ int main( int argc, char* argv[] )
         ;
 
     po::positional_options_description p;
-    p.add("argv-in-container", -1);
+    p.add( "argv-in-container", -1 );
 
     try {
         po::variables_map vm;
