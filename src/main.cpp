@@ -59,6 +59,8 @@
 namespace awaho
 {
     namespace fs = boost::filesystem;
+    namespace bio = boost::iostreams;
+    namespace adap = boost::adaptors;
 
     struct mount_point
     {
@@ -76,13 +78,13 @@ namespace awaho
 
     struct limits_values_t
     {
-        boost::optional<int> core;       //
-        boost::optional<int> nofile;     // number
-        boost::optional<int> nproc;      // number
-        boost::optional<int> memlock;    // number
-        boost::optional<int> cpu;        // seconds
-        boost::optional<int> memory;     // bytes
-        boost::optional<int> fsize;      // bytes
+        boost::optional<::rlim_t> core;     //
+        boost::optional<::rlim_t> nofile;   // number
+        boost::optional<::rlim_t> nproc;    // number
+        boost::optional<::rlim_t> memlock;  // number
+        boost::optional<::rlim_t> cputime;  // seconds
+        boost::optional<::rlim_t> memory;   // bytes
+        boost::optional<::rlim_t> fsize;    // bytes
     };
 
     struct pipe_redirect_t
@@ -152,8 +154,8 @@ namespace awaho
             if ( lim.memlock ) {
                 os << "    " << "memlock : " << *lim.memlock << std::endl;
             }
-            if ( lim.cpu ) {
-                os << "    " << "cpu     : " << *lim.cpu << std::endl;
+            if ( lim.cputime ) {
+                os << "    " << "cputime : " << *lim.cputime << std::endl;
             }
             if ( lim.memory ) {
                 os << "    " << "memory  : " << *lim.memory << std::endl;
@@ -176,7 +178,7 @@ namespace awaho
         }
 
         os << "  commands: " << std::endl
-           << "    " << boost::algorithm::join( opts.commands, " " ) << std::endl;
+           << "    " << boost::algorithm::join( opts.commands, ", " ) << std::endl;
 
         os << "  envs: " << std::endl;
         for( auto&& env : opts.envs ) {
@@ -323,6 +325,8 @@ namespace awaho
         // important
         fs::current_path( host_container_dir );
 
+        // TODO: copy "copy_point" dir
+
         // mount system dirs
         for( auto const& host_ro_mount_point : HostReadonlyMountPoints ) {
             if ( !fs::exists( host_ro_mount_point ) ) {
@@ -436,6 +440,8 @@ namespace awaho
             cleanup_directory( in_container_mount_point );
         }
 
+        // TODO: copy "copy_point" dir
+
         //
         try {
             fs::current_path( host_jail_base_path );
@@ -469,7 +475,44 @@ namespace awaho
     }
 
 
+    template<typename V>
+    auto make_buffer_for_execve(
+        V const& data_set
+        )
+        -> std::tuple<std::vector<char*>, std::shared_ptr<char>>
+    {
+        std::vector<char*> ptr_list(
+            data_set.size() + 1,
+            nullptr
+            ); // +1 is for termination
 
+        auto const cont_buf_len =
+            std::accumulate( data_set.cbegin(), data_set.cend(),
+                             0, []( std::size_t const& len, std::string const& r ) {
+                                 return len + ( r.size() + 1 );     // length + EOF
+                             });
+
+        // 0 filled continuous buffer
+        std::shared_ptr<char> argv_buf(
+            new char[cont_buf_len]{},
+            std::default_delete<char[]>()
+            );
+
+        std::size_t argv_cur_len = 0;
+        for( auto&& im : data_set | adap::indexed( 0 ) ) {
+            // current ptr in continuous buffer
+            char* const cur_ptr = argv_buf.get() + argv_cur_len;
+
+            std::copy( im.value().cbegin(), im.value().cend(), cur_ptr );
+
+            ptr_list[im.index()] = cur_ptr;
+
+            argv_cur_len += im.value().size() + 1;  // +1 is EOF
+        }
+        assert( argv_cur_len == cont_buf_len );
+
+        return std::make_tuple( std::move( ptr_list ), argv_buf );
+    }
 
     // this function must be invoked by forked process
     void execute_command_in_jail(
@@ -516,9 +559,9 @@ namespace awaho
         if ( opts.limits.memlock ) {
             set_limit( RLIMIT_MEMLOCK, *opts.limits.memlock );
         }
-        if ( opts.limits.cpu ) {
+        if ( opts.limits.cputime ) {
             // CPU can be used only cpu_limit_time(sec)
-            set_limit( RLIMIT_CPU, *opts.limits.cpu, *opts.limits.cpu + 3 );
+            set_limit( RLIMIT_CPU, *opts.limits.cputime, *opts.limits.cputime + 3 );
         }
         if ( opts.limits.memory ) {
             // Memory can be used only memory_limit_bytes [be careful!]
@@ -549,7 +592,13 @@ namespace awaho
                    << " errno=" << errno << " : " << std::strerror( errno );
                 throw std::runtime_error( ss.str() );
             }
-            ::close( pr.host_fd );
+
+            if ( ::close( pr.host_fd ) == -1 ) {
+                std::stringstream ss;
+                ss << "Failed to close the host pipe: "
+                   << " errno=" << errno << " : " << std::strerror( errno );
+                throw std::runtime_error( ss.str() );
+            }
         }
 
         // ===
@@ -603,6 +652,22 @@ namespace awaho
 
         std::system("ln -s /proc proc");
         std::system("ln /lib/yutopp.lib beautiful_something");
+
+        // execute target program!
+        auto const& filename = opts.commands.at( 0 );
+
+        auto argv_pack = make_buffer_for_execve( opts.commands );
+        auto& argv = std::get<0>( argv_pack );
+
+        auto envp_pack = make_buffer_for_execve( opts.envs );
+        auto& envp = std::get<0>( envp_pack );
+
+        if ( ::execve( filename.c_str(), argv.data(), envp.data() ) == -1 ) {
+            std::stringstream ss;
+            ss << "Failed to execve: "
+               << " errno=" << errno << " : " << std::strerror( errno );
+            throw std::runtime_error( ss.str() );
+        }
     }
 
 
@@ -783,9 +848,9 @@ namespace awaho
                     }
 
                     auto const user_time_micro_sec =
-                        static_cast<double>( usage.ru_utime.tv_sec ) * 1000000.0 + static_cast<double>( usage.ru_utime.tv_usec );
+                        static_cast<double>( usage.ru_utime.tv_sec ) * 1e6 + static_cast<double>( usage.ru_utime.tv_usec );
                     auto const system_time_micro_sec =
-                        static_cast<double>( usage.ru_stime.tv_sec ) * 1000000.0 + static_cast<double>( usage.ru_stime.tv_usec );
+                        static_cast<double>( usage.ru_stime.tv_sec ) * 1e6 + static_cast<double>( usage.ru_stime.tv_usec );
 
                     auto const cpu_time_micro_sec = user_time_micro_sec + system_time_micro_sec;
 
@@ -807,12 +872,12 @@ namespace awaho
                 );
 
 
-            if ( opts.limits.cpu ) {
+            if ( opts.limits.cputime ) {
                 // realtime checking apart from cgroup limits
                 // prevent sleep() function running infinite
                 // +4 is extention...
                 auto const span
-                    = std::chrono::seconds{ *opts.limits.cpu + 4 };
+                    = std::chrono::seconds{ *opts.limits.cputime + 4 };
                 if ( f.wait_for( span ) == std::future_status::timeout ) {
                     std::cout << "Timer timeout!" << std::endl;
 
@@ -835,7 +900,6 @@ namespace awaho
                 std::cout << "parent process: child finished / " << std::endl
                           << *child_result << std::endl;
 
-                namespace bio = boost::iostreams;
                 auto const close_flag = ( opts.result_output_fd > 2 )
                     ? bio::file_descriptor_flags::close_handle
                     : bio::file_descriptor_flags::never_close_handle
@@ -927,16 +991,19 @@ int main( int argc, char* argv[] )
         ( "mount", po::value<std::vector<std::string>>(), "host:guest(:rw?)" )
         ( "copy", po::value<std::vector<std::string>>(), "host:guest" )
 
-        ( "core", po::value<int>(), "setrlimit core" )
-        ( "nofile", po::value<int>(), "setrlimit nofile" )
-        ( "nproc", po::value<int>(), "setrlimit nproc" )
-        ( "memlock", po::value<int>(), "setrlimit memlock" )
-        ( "cpu", po::value<int>(), "setrlimit cpu" )
-        ( "memory", po::value<int>(), "setrlimit memory" )
-        ( "fsize", po::value<int>(), "setrlimit fsize" )
+        ( "core", po::value<::rlim_t>(), "setrlimit core" )
+        ( "nofile", po::value<::rlim_t>(), "setrlimit nofile" )
+        ( "nproc", po::value<::rlim_t>(), "setrlimit nproc" )
+        ( "memlock", po::value<::rlim_t>(), "setrlimit memlock" )
+        ( "cputime", po::value<::rlim_t>(), "setrlimit cpu time" )
+        ( "memory", po::value<::rlim_t>(), "setrlimit memory" )
+        ( "fsize", po::value<::rlim_t>(), "setrlimit fsize" )
 
         ( "stack-size", po::value<std::size_t>(), "stack size" )
         ( "pipe", po::value<std::vector<std::string>>(), "host-fd:guest-fd" )
+
+        // commands is "argv-in-container"
+        ( "env", po::value<std::vector<std::string>>(), "env variables" )
 
         ( "result-fd", po::value<int>(), "fd can get detail of result" )
         ( "result-type", po::value<std::string>(), "type of result [json]" )
@@ -1064,37 +1131,37 @@ int main( int argc, char* argv[] )
         {
             if ( vm.count( "core" ) ) {
                 c_opts.limits.core
-                    = vm["core"].as<std::size_t>();
+                    = vm["core"].as<::rlim_t>();
             }
 
             if ( vm.count( "nofile" ) ) {
                 c_opts.limits.nofile
-                    = vm["nofile"].as<std::size_t>();
+                    = vm["nofile"].as<::rlim_t>();
             }
 
             if ( vm.count( "nproc" ) ) {
                 c_opts.limits.nproc
-                    = vm["nproc"].as<std::size_t>();
+                    = vm["nproc"].as<::rlim_t>();
             }
 
             if ( vm.count( "memlock" ) ) {
                 c_opts.limits.memlock
-                    = vm["memlock"].as<std::size_t>();
+                    = vm["memlock"].as<::rlim_t>();
             }
 
-            if ( vm.count( "cpu" ) ) {
-                c_opts.limits.cpu
-                    = vm["cpu"].as<std::size_t>();
+            if ( vm.count( "cputime" ) ) {
+                c_opts.limits.cputime
+                    = vm["cputime"].as<::rlim_t>();
             }
 
             if ( vm.count( "memory" ) ) {
                 c_opts.limits.memory
-                    = vm["memory"].as<std::size_t>();
+                    = vm["memory"].as<::rlim_t>();
             }
 
             if ( vm.count( "fsize" ) ) {
                 c_opts.limits.fsize
-                    = vm["fsize"].as<std::size_t>();
+                    = vm["fsize"].as<::rlim_t>();
             }
         }
 
@@ -1123,6 +1190,16 @@ int main( int argc, char* argv[] )
 
                 c_opts.pipe_redirects.emplace_back( std::move( pr ) );
             }
+        }
+
+        if ( vm.count( "argv-in-container" ) ) {
+            c_opts.commands =
+                vm["argv-in-container"].as<std::vector<std::string>>();
+        }
+
+        if ( vm.count( "env" ) ) {
+            c_opts.envs =
+                vm["env"].as<std::vector<std::string>>();
         }
 
         if ( vm.count( "result-fd" ) ) {
