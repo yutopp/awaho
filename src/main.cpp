@@ -40,6 +40,8 @@
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/file_descriptor.hpp>
 
+#include <boost/range/algorithm_ext/erase.hpp>
+
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/stat.h>
@@ -61,6 +63,7 @@ namespace awaho
     namespace fs = boost::filesystem;
     namespace bio = boost::iostreams;
     namespace adap = boost::adaptors;
+    namespace ipc = boost::interprocess;
 
     struct mount_point
     {
@@ -273,11 +276,9 @@ namespace awaho
         fs::path const& guest_mount_point
         ) noexcept
     {
-        using namespace boost::adaptors;
-
         bool result = true;
 
-        for( auto const& n : StandardNodes | reversed ) {
+        for( auto const& n : StandardNodes | adap::reversed ) {
             try {
                 fs::remove( guest_mount_point / std::get<0>( n ) );
 
@@ -396,8 +397,6 @@ namespace awaho
         MountPoints const& mount_points
         )
     {
-        using namespace boost::adaptors;
-
         // important
         try {
             fs::current_path( host_container_dir );
@@ -419,7 +418,7 @@ namespace awaho
         cleanup_directory( guest_proc_path );
 
         //
-        for( auto const& users_mp : mount_points | reversed ) {
+        for( auto const& users_mp : mount_points | adap::reversed ) {
             auto const in_container_mount_point = fs::path(".") / users_mp.guest_path;
 
             if ( !fs::exists( in_container_mount_point ) ) {
@@ -430,7 +429,7 @@ namespace awaho
         }
 
         //
-        for( auto const& host_ro_mount_point : HostReadonlyMountPoints | reversed ) {
+        for( auto const& host_ro_mount_point : HostReadonlyMountPoints | adap::reversed ) {
             auto const in_container_mount_point = fs::path(".") / host_ro_mount_point;
 
             if ( !fs::exists( in_container_mount_point ) ) {
@@ -793,8 +792,6 @@ namespace awaho
         std::size_t const stack_for_child_size = opts.stack_size;
         auto stack_for_child = new std::uint8_t[stack_for_child_size];
 
-        namespace ipc = boost::interprocess;
-
         try{
             constexpr auto CommBufferSize = 2048;
 
@@ -920,6 +917,9 @@ namespace awaho
                         { "systemTimeMicroSec", picojson::value( child_result->system_time_micro_sec ) },
                         { "cpuTimeMicroSec", picojson::value( child_result->cpu_time_micro_sec ) },
                         { "usedMemoryBytes", picojson::value( static_cast<double>( child_result->used_memory_bytes ) ) },
+
+                        { "systemErrorStatus", picojson::value( static_cast<double>( comm_info_p->error_status ) ) },
+                        { "systemErrorMessage", picojson::value( comm_info_p->message ) },
                     };
                     picojson::value root( obj );
 
@@ -933,13 +933,6 @@ namespace awaho
             } else {
                 std::cerr << "parent process: child finished :: failed to waitpid" << std::endl;
             }
-
-            // comm check
-            std::cout << std::endl
-                      << "comm: " << comm_info_p->error_status << std::endl
-                      << "mes : " << comm_info_p->message << std::endl;
-
-
 
         } catch( ipc::interprocess_exception const& ex ) {
             std::cerr << "ipc error: " << ex.what() << std::endl;
@@ -1193,13 +1186,15 @@ int main( int argc, char* argv[] )
         }
 
         if ( vm.count( "argv-in-container" ) ) {
-            c_opts.commands =
+            auto commands =
                 vm["argv-in-container"].as<std::vector<std::string>>();
+
+            c_opts.commands = boost::remove_erase( commands, "" );  // remove empty
         }
 
         if ( vm.count( "env" ) ) {
-            c_opts.envs =
-                vm["env"].as<std::vector<std::string>>();
+            auto envs = vm["env"].as<std::vector<std::string>>();
+            c_opts.envs = boost::remove_erase( envs, "" );  // remove empty
         }
 
         if ( vm.count( "result-fd" ) ) {
