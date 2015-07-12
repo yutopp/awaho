@@ -1,6 +1,12 @@
 # Sandbox environment
-** !! under construction !! **  
+**!! under construction !!**  
 Currently, this program may harm your computer. Please be careful...
+
+### Ex
+
+```
+sudo awaho --mount /tmp/test_home:/home/torigoya --start-guest-path /home/torigoya --cputime 10 -- /bin/ls -la
+```
 
 ## Require
 - boost >= 1.56
