@@ -34,9 +34,6 @@
 #include <boost/interprocess/anonymous_shared_memory.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 
-#include <boost/asio/io_service.hpp>
-#include <boost/asio/signal_set.hpp>
-
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/file_descriptor.hpp>
 
@@ -754,7 +751,6 @@ namespace awaho
     }
 
 
-
     // TODO: exception handling
     void run_in_container( container_options_t const& opts )
     {
@@ -939,20 +935,24 @@ namespace awaho
         }
     }
 
-
-    void sig_handler(
-        boost::system::error_code const& error,
-        int signal_number
-        )
-    {
-        std::cout << "!!!!! sig hand: " << signal_number << std::endl;
-    }
+    static const std::array<int, 5> IgnSignals{{
+        SIGHUP,
+        SIGINT,
+        SIGQUIT,
+        SIGPIPE,
+        SIGTERM
+    }};
 
     int execute( container_options_t const& opts ) noexcept
     try {
-        boost::asio::io_service io_service;
-        boost::asio::signal_set signals( io_service, SIGINT, SIGTERM );
-        signals.async_wait( sig_handler );
+        for( auto&& sig : IgnSignals ) {
+            if ( ::signal( sig, SIG_IGN ) == SIG_ERR ) {
+                std::stringstream ss;
+                ss << "Failed to signal: " << sig
+                   << " errno=" << errno << " : " << std::strerror( errno );
+                throw std::runtime_error( ss.str() );
+            }
+        }
 
         std::cout << opts << std::endl;
         run_in_container( opts );
