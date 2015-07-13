@@ -597,7 +597,7 @@ namespace awaho
             }
         }
 
-        // ===
+        // === discard privilege
         // change group
         if ( ::setresgid( user.group_id(), user.group_id(), user.group_id() ) == -1 ) {
             std::stringstream ss;
@@ -615,41 +615,10 @@ namespace awaho
         }
         // ===
 
-        //
-        std::system("pwd");
-        std::system("ls -la");
+        // ==
+        // now I am in the sandbox!
+        // ==
 
-        // std::system("rm /etc/yutopp_test.txt");
-
-        // std::this_thread::sleep_for(std::chrono::seconds(4));
-
-        std::system("ls -la /");
-        std::system("cd /; ls -la ../");
-
-        std::system("ls -la /dev");
-
-        std::system("echo /home");
-        std::system("ls -la /home");
-        std::system("echo /home/torigoya");
-        std::system("ls -la /home/torigoya");
-
-        std::system("id");
-
-        std::system("uname -a");
-
-        std::system("ps aux");
-
-        std::system("prlimit");
-
-        std::system("sudo ls -la");
-        // execute target program
-
-        std::system("touch bo.txt");
-
-        std::system("ln -s /proc proc");
-        std::system("ln /lib/yutopp.lib beautiful_something");
-
-        // execute target program!
         auto const& filename = opts.commands.at( 0 );
 
         auto argv_pack = make_buffer_for_execve( opts.commands );
@@ -658,6 +627,7 @@ namespace awaho
         auto envp_pack = make_buffer_for_execve( opts.envs );
         auto& envp = std::get<0>( envp_pack );
 
+        // replace self process
         if ( ::execve( filename.c_str(), argv.data(), envp.data() ) == -1 ) {
             std::stringstream ss;
             ss << "Failed to execve: "
