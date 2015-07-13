@@ -618,8 +618,13 @@ namespace awaho
         // ==
         // now I am in the sandbox!
         // ==
+        if ( opts.commands.size() < 1 ) {
+            std::stringstream ss;
+            ss << "Failed to prepare environment: commands must have >= 1 elements (" << opts.commands.size() << ")";
+            throw std::runtime_error( ss.str() );
+        }
 
-        auto const& filename = opts.commands.at( 0 );
+        auto const& filename = opts.commands[0];
 
         auto argv_pack = make_buffer_for_execve( opts.commands );
         auto& argv = std::get<0>( argv_pack );
@@ -905,12 +910,14 @@ namespace awaho
         }
     }
 
-    static const std::array<int, 5> IgnSignals{{
+    static const std::array<int, 7> IgnSignals{{
         SIGHUP,
         SIGINT,
         SIGQUIT,
         SIGPIPE,
-        SIGTERM
+        SIGTERM,
+        SIGXCPU,
+        SIGXFSZ
     }};
 
     int execute( container_options_t const& opts ) noexcept
