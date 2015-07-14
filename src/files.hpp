@@ -210,10 +210,8 @@ namespace awaho
         linux::user const& user
         )
     {
-        if ( !fs::is_directory( guest_dir ) ) {
-            std::stringstream ss;
-            ss << "Error: " << guest_dir << " is not a directory.";
-            throw std::runtime_error( ss.str() );
+        if ( !fs::is_directory( guest_dir ) || fs::is_symlink( guest_dir ) ) {
+            return change_file_owner( guest_dir, user );
         }
 
         auto const begin = fs::directory_iterator( guest_dir );
@@ -318,6 +316,95 @@ namespace awaho
                << " errno=" << errno << " : " << std::strerror( errno );
             throw std::runtime_error( ss.str() );
         }
+    }
+
+
+    void copy_user_files(
+        fs::path const& host_copy_point,
+        fs::path const& guest_copy_point
+        )
+    {
+        // TODO: add timeout
+        std::cout << "Copying: " << host_copy_point << " to " << guest_copy_point
+                  << " / is dir: " << fs::is_directory( host_copy_point )
+                  << " / is sym: " << fs::is_symlink( host_copy_point ) << std::endl;
+
+        //
+        if ( fs::exists( guest_copy_point ) ) {
+            std::stringstream ss;
+            ss << "Failed to copy: GUEST "
+               << guest_copy_point << " is already exists";
+            throw std::runtime_error( ss.str() );
+        }
+
+        bool const do_rec =
+            fs::is_directory( host_copy_point ) &&
+            !fs::is_symlink( host_copy_point );
+
+        if ( !fs::exists( guest_copy_point.parent_path() ) ) {
+            fs::create_directory( guest_copy_point.parent_path() );
+        }
+
+        fs::copy( host_copy_point, guest_copy_point );
+
+        if ( do_rec ) {
+            // copy recuesive
+            auto const begin = fs::directory_iterator( host_copy_point );
+            auto const end = fs::directory_iterator();
+
+            for( auto&& it : boost::make_iterator_range( begin, end ) ) {
+                auto const& p = it.path();
+                auto const& filename = p.filename();
+
+                copy_user_files( host_copy_point / filename, guest_copy_point / filename );
+            }
+        }
+    }
+
+    // ...?
+    bool remove_user_files(
+        fs::path const& guest_copy_point
+        )
+    try {
+        std::cout << "Removing: " << guest_copy_point << std::endl;
+
+        //
+        if ( fs::is_symlink( guest_copy_point ) ||
+             fs::is_regular_file( guest_copy_point )
+            ) {
+            fs::remove( guest_copy_point );
+
+            return true;
+
+        } else if ( fs::is_directory( guest_copy_point ) ) {
+            // remove recuesive
+            auto const begin = fs::directory_iterator( guest_copy_point );
+            auto const end = fs::directory_iterator();
+
+            bool succeeded = true;
+            for( auto&& it : boost::make_iterator_range( begin, end ) ) {
+                auto const& p = it.path();
+
+                succeeded &= remove_user_files( p );
+            }
+
+            succeeded &= remove_directory_if_empty( guest_copy_point );
+
+            return succeeded;
+
+        } else {
+            return false;
+        }
+
+    } catch( fs::filesystem_error const& e ) {
+        std::cerr << "Failed to remove_node: "
+                  << e.what() << std::endl;
+        return false;
+
+    } catch(...) {
+        std::cerr << "Failed to remove_node: "
+                  << "unexpected" << std::endl;
+        return false;
     }
 
 } // namespace awaho

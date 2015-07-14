@@ -313,17 +313,16 @@ namespace awaho
     static auto const guest_dev_path = fs::path( "./dev" );
     static auto const guest_tmp_path = fs::path( "./tmp" );
 
-    template<typename MountPoints>
+    template<typename MountPoints, typename CopyPoints>
     void create_files_in_jail(
         fs::path const& host_container_dir,
         MountPoints const& mount_points,
+        CopyPoints const& copy_points,
         linux::user const& user
         )
     {
         // important
         fs::current_path( host_container_dir );
-
-        // TODO: copy "copy_point" dir
 
         // mount system dirs
         for( auto const& host_ro_mount_point : HostReadonlyMountPoints ) {
@@ -363,6 +362,23 @@ namespace awaho
         mount_procfs( guest_proc_path );
         mount_tmpfs( guest_tmp_path );
 
+        // copy user's dirs
+        for( auto const& users_cp : copy_points ) {
+            if ( !fs::exists( users_cp.host_path ) ) {
+                std::stringstream ss;
+                ss << "Failed: copy file you specified is not found. "
+                   << users_cp.host_path;
+                throw std::runtime_error( ss.str() );
+            }
+
+            auto const in_container_copy_point = fs::path(".") / users_cp.guest_path;
+            copy_user_files(
+                users_cp.host_path,
+                in_container_copy_point
+                );
+            change_directory_owner_rec( in_container_copy_point, user );
+        }
+
         //
         make_standard_nodes( guest_dev_path, fs::perms( 0555 ) );
 
@@ -370,10 +386,11 @@ namespace awaho
         link_io( guest_proc_path, guest_dev_path );
     }
 
-    template<typename MountPoints>
+    template<typename MountPoints, typename CopyPoints>
     void make_jail_environment(
         fs::path const& host_container_dir,
         MountPoints const& mount_points,
+        CopyPoints const& copy_points,
         linux::user const& user
         )
     {
@@ -383,17 +400,20 @@ namespace awaho
         fs::create_directories( host_container_dir );
 
         // create/mount/link files
-        create_files_in_jail( host_container_dir, mount_points, user );
+        create_files_in_jail( host_container_dir, mount_points, copy_points, user );
     }
 
 
-    template<typename MountPoints>
+    template<typename MountPoints, typename CopyPoints>
     void reset_jail_environment(
         fs::path const& host_jail_base_path,
         fs::path const& host_container_dir,
-        MountPoints const& mount_points
+        MountPoints const& mount_points,
+        CopyPoints const& copy_points
         )
     {
+        boost::system::error_code ec;
+
         // important
         try {
             fs::current_path( host_container_dir );
@@ -410,6 +430,17 @@ namespace awaho
         //
         remove_standard_nodes( guest_dev_path );
 
+        // remove "copy_point" dir
+        for( auto const& users_cp : copy_points ) {
+            auto const in_container_copy_point = fs::path(".") / users_cp.guest_path;
+
+            if ( !fs::exists( in_container_copy_point, ec ) ) {
+                continue;
+            }
+
+            remove_user_files( in_container_copy_point );
+        }
+
         //
         cleanup_directory( guest_tmp_path );
         cleanup_directory( guest_proc_path );
@@ -418,7 +449,7 @@ namespace awaho
         for( auto const& users_mp : mount_points | adap::reversed ) {
             auto const in_container_mount_point = fs::path(".") / users_mp.guest_path;
 
-            if ( !fs::exists( in_container_mount_point ) ) {
+            if ( !fs::exists( in_container_mount_point, ec ) ) {
                 continue;
             }
 
@@ -429,14 +460,12 @@ namespace awaho
         for( auto const& host_ro_mount_point : HostReadonlyMountPoints | adap::reversed ) {
             auto const in_container_mount_point = fs::path(".") / host_ro_mount_point;
 
-            if ( !fs::exists( in_container_mount_point ) ) {
+            if ( !fs::exists( in_container_mount_point, ec ) ) {
                 continue;
             }
 
             cleanup_directory( in_container_mount_point );
         }
-
-        // TODO: copy "copy_point" dir
 
         //
         try {
@@ -517,17 +546,11 @@ namespace awaho
         linux::user const& user
         )
     {
-        /*
-        std::this_thread::sleep_for(std::chrono::seconds(4));
-
-        std::cout << " SLEEP =============" << std::endl;
-        return;
-        */
-
         // make environment
         make_jail_environment(
             host_container_dir,
             opts.mount_points,
+            opts.copy_points,
             user
             );
 
@@ -756,7 +779,8 @@ namespace awaho
             reset_jail_environment(
                 opts.host_containers_base_dir,
                 host_container_dir,
-                opts.mount_points
+                opts.mount_points,
+                opts.copy_points
                 );
         };
 
