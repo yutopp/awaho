@@ -5,12 +5,12 @@
 // (See accompanying file LICENSE_1_0.txt or copy at
 // http://www.boost.org/LICENSE_1_0.txt)
 //
-
 #pragma once
 
 #include <sstream>
 
 #include <sys/types.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>

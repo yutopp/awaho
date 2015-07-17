@@ -54,6 +54,8 @@ namespace awaho
                     group_id_ = boost::lexical_cast<int>( boost::trim_copy( *group_id_s ) );
                     is_valid_ = true;
 
+                    std::cout << "User created: " << name_ << std::endl;
+
                 } catch(...) {
                     // TODO: ...
 
@@ -68,7 +70,6 @@ namespace awaho
                 , user_id_( rhs.user_id_ )
                 , group_id_( rhs.group_id_ )
             {
-                std::cout << "move ctor" << std::endl;
                 // set invalid status to moved data
                 rhs.is_valid_ = false;
                 rhs.is_user_created_ = false;
@@ -78,7 +79,7 @@ namespace awaho
             {
                 if ( is_user_created_ ) {
                     auto const stat = std::system( ("userdel " + name_).c_str() );
-                    std::cout << "user / delete stat: " << stat << std::endl;
+                    std::cout << "User deleted: " << name_ << " / delete stat: " << stat << std::endl;
                 }
             }
 

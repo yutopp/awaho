@@ -5,6 +5,9 @@
 // (See accompanying file LICENSE_1_0.txt or copy at
 // http://www.boost.org/LICENSE_1_0.txt)
 //
+#include "container_environment.hpp"
+#include "file_manip.hpp"
+#include "container_options.hpp"
 
 #include <iostream>
 #include <memory>
@@ -48,7 +51,6 @@
 #include <atomic>
 #include <future>
 
-#include "files.hpp"
 #include "user.hpp"
 #include "utility.hpp"
 
@@ -62,422 +64,34 @@ namespace awaho
     namespace adap = boost::adaptors;
     namespace ipc = boost::interprocess;
 
-    struct mount_point
+    struct executed_result
     {
-        fs::path host_path;
-        fs::path guest_path;
-
-        bool is_readonly;
+        bool exited;
+        int exit_status;
+        bool signaled;
+        int signal;
+        double user_time_micro_sec;
+        double system_time_micro_sec;
+        double cpu_time_micro_sec;
+        unsigned long long used_memory_bytes;
     };
 
-    struct copy_point
+    std::ostream& operator<<( std::ostream& os, executed_result const& res )
     {
-        fs::path host_path;
-        fs::path guest_path;
-    };
-
-    struct limits_values_t
-    {
-        boost::optional<::rlim_t> core;     //
-        boost::optional<::rlim_t> nofile;   // number
-        boost::optional<::rlim_t> nproc;    // number
-        boost::optional<::rlim_t> memlock;  // number
-        boost::optional<::rlim_t> cputime;  // seconds
-        boost::optional<::rlim_t> memory;   // bytes
-        boost::optional<::rlim_t> fsize;    // bytes
-    };
-
-    struct pipe_redirect_t
-    {
-        int host_fd;
-        int guest_fd;
-    };
-
-    struct container_options_t
-    {
-        fs::path host_containers_base_dir;
-
-        fs::path in_container_start_path;       // Ex. "/home/some-user/"
-        std::vector<mount_point> mount_points;
-        std::vector<copy_point> copy_points;
-        limits_values_t limits;
-
-        std::size_t stack_size;
-        std::vector<pipe_redirect_t> pipe_redirects;
-
-        std::vector<std::string> commands;
-        std::vector<std::string> envs;
-
-        int result_output_fd;
-        std::string result_output_type;
-    };
-
-    std::ostream& operator<<( std::ostream& os, container_options_t const& opts )
-    {
-        os << "container_options" << std::endl;
-        os << "  host_containers_base_dir: " << opts.host_containers_base_dir << std::endl
-           << "  in_container_start_path : " << opts.in_container_start_path << std::endl
-            ;
-        os << "  mounts: " << std::endl;
-        for( auto&& im : opts.mount_points | boost::adaptors::indexed( 0 ) ) {
-            os << "    " << im.index() << " ==" << std::endl;
-
-            auto&& mp = im.value();
-            os << "      HOST     : " << mp.host_path << std::endl
-               << "      GUEST    : " << mp.guest_path << std::endl
-               << "      READONLY : " << mp.is_readonly << std::endl
-                ;
-        }
-
-        os << "  copies: " << std::endl;
-        for( auto&& im : opts.copy_points | boost::adaptors::indexed( 0 ) ) {
-            os << "    " << im.index() << " ==" << std::endl;
-
-            auto&& cp = im.value();
-            os << "      HOST     : " << cp.host_path << std::endl
-               << "      GUEST    : " << cp.guest_path << std::endl
-                ;
-        }
-
-        os << "  limits: " << std::endl;
-        {
-            auto const& lim = opts.limits;
-            if ( lim.core ) {
-                os << "    " << "core    : " << *lim.core << std::endl;
-            }
-            if ( lim.nofile ) {
-                os << "    " << "nofile  : " << *lim.nofile << std::endl;
-            }
-            if ( lim.nproc ) {
-                os << "    " << "nproc   : " << *lim.nproc << std::endl;
-            }
-            if ( lim.memlock ) {
-                os << "    " << "memlock : " << *lim.memlock << std::endl;
-            }
-            if ( lim.cputime ) {
-                os << "    " << "cputime : " << *lim.cputime << std::endl;
-            }
-            if ( lim.memory ) {
-                os << "    " << "memory  : " << *lim.memory << std::endl;
-            }
-            if ( lim.fsize ) {
-                os << "    " << "fsize   : " << *lim.fsize << std::endl;
-            }
-        }
-
-        os << "  stack_size: " << opts.stack_size << std::endl;
-
-        os << "  pipes: " << std::endl;
-        for( auto&& im : opts.pipe_redirects | boost::adaptors::indexed( 0 ) ) {
-            os << "    " << im.index() << " ==" << std::endl;
-
-            auto&& pr = im.value();
-            os << "      HOST FD  : " << pr.host_fd << std::endl
-               << "      GUEST FD : " << pr.guest_fd << std::endl
-                ;
-        }
-
-        os << "  commands: " << std::endl
-           << "    " << boost::algorithm::join( opts.commands, ", " ) << std::endl;
-
-        os << "  envs: " << std::endl;
-        for( auto&& env : opts.envs ) {
-            os << "    " << env << std::endl;
-        }
-
-        os << "  result_output_fd  : " << opts.result_output_fd << std::endl
-           << "  result_output_type: " << opts.result_output_type << std::endl
+        os << "exited: " << res.exited << std::endl
+           << "exit_status:  " << res.exit_status << std::endl
+           << "signaled: " << res.signaled << std::endl
+           << "signal: " << res.signal << std::endl
+           << "user_time_micro_sec: " << res.user_time_micro_sec << std::endl
+           << "system_time_micro_sec: " << res.system_time_micro_sec << std::endl
+           << "cpu_time_micro_sec: " << res.cpu_time_micro_sec << std::endl
+           << "used_memory_bytes: " << res.used_memory_bytes << std::endl
             ;
 
         return os;
     }
 
 
-
-
-    // NOTE: be careful order of directories. short to long.
-    static char const * const HostReadonlyMountPoints[] = {
-        "/etc",
-        "/include",
-        "/lib",
-        "/lib32",
-        "/lib64",
-        "/bin",
-        "/usr/include",
-        "/usr/lib",
-        "/usr/lib32",
-        "/usr/lib64",
-        "/usr/bin",
-        "/usr/local/torigoya",
-    };
-
-
-    template<typename F = decltype(&remove_directory_if_empty)>
-    bool remove_container_directory(
-        fs::path const& guest_dir,
-        F const& rm_f = &remove_directory_if_empty
-        )
-    {
-        assert( guest_dir.is_absolute() );
-
-        auto const begin = fs::directory_iterator( guest_dir );
-        auto const end = fs::directory_iterator();
-
-        for( auto&& it : boost::make_iterator_range( begin, end ) ) {
-            auto const& p = it.path();
-            std::cout << "-> " << p << std::endl;
-
-            if ( fs::is_symlink( p ) ) {
-                // TODO: unlink
-
-            } else if ( fs::is_directory( p ) ) {
-                remove_container_directory( p, rm_f );
-
-            } else if ( fs::is_regular_file( p ) ) {
-                // TODO: remove
-
-            }
-        }
-
-        return rm_f( guest_dir );
-    }
-
-    static std::tuple<char const*, ::dev_t, ::mode_t> const StandardNodes[] = {
-        std::make_tuple( "null", ::makedev( 1, 3 ), 0666 ),
-        std::make_tuple( "zero", ::makedev( 1, 5 ), 0666 ),
-        std::make_tuple( "full", ::makedev( 1, 7 ), 0666 ),
-        std::make_tuple( "random", ::makedev( 1, 8 ), 0644 ),
-        std::make_tuple( "urandom", ::makedev( 1, 9 ), 0644 )
-    };
-
-    void make_standard_nodes(
-        fs::path const& guest_mount_point,
-        fs::perms const& prms
-        )
-    {
-        // TODO: add timeout
-        // TODO: check permission
-        std::cout << "Createing: " << "/dev" << " to " << guest_mount_point << std::endl;
-
-        //
-        fs::create_directories( guest_mount_point );
-        fs::permissions( guest_mount_point, prms );
-
-        //
-        for( auto const& n : StandardNodes ) {
-            make_node( guest_mount_point / std::get<0>( n ), std::get<1>( n ), std::get<2>( n ) );
-        }
-    }
-
-    bool remove_standard_nodes(
-        fs::path const& guest_mount_point
-        ) noexcept
-    {
-        bool result = true;
-
-        for( auto const& n : StandardNodes | adap::reversed ) {
-            try {
-                fs::remove( guest_mount_point / std::get<0>( n ) );
-
-            } catch(...) {
-                // TODO: error handling
-                result = false;
-            }
-        }
-
-        return result;
-    }
-
-    void link_io(
-        fs::path const& guest_proc_dir,
-        fs::path const& guest_dev_dir
-        )
-    {
-        make_symlink( guest_proc_dir / "self/fd/0", guest_dev_dir / "stdin" );
-        make_symlink( guest_proc_dir / "self/fd/1", guest_dev_dir / "stdout" );
-        make_symlink( guest_proc_dir / "self/fd/2", guest_dev_dir / "stderr" );
-    }
-
-    bool unlink_io(
-        fs::path const& guest_dev_dir
-        ) noexcept
-    {
-        auto const b1 = remove_symlink( guest_dev_dir / "stderr" );
-        auto const b2 = remove_symlink( guest_dev_dir / "stdout" );
-        auto const b3 = remove_symlink( guest_dev_dir / "stdin" );
-
-        return b1 && b2 && b3;
-    }
-
-    static auto const guest_proc_path = fs::path( "./proc" );
-    static auto const guest_dev_path = fs::path( "./dev" );
-    static auto const guest_tmp_path = fs::path( "./tmp" );
-
-    template<typename MountPoints, typename CopyPoints>
-    void create_files_in_jail(
-        fs::path const& host_container_dir,
-        MountPoints const& mount_points,
-        CopyPoints const& copy_points,
-        linux::user const& user
-        )
-    {
-        // important
-        fs::current_path( host_container_dir );
-
-        // mount system dirs
-        for( auto const& host_ro_mount_point : HostReadonlyMountPoints ) {
-            if ( !fs::exists( host_ro_mount_point ) ) {
-                continue;
-            }
-
-            auto const in_container_mount_point = fs::path(".") / host_ro_mount_point;
-            mount_directory_ro( host_ro_mount_point, in_container_mount_point );
-        }
-
-        // mount users dirs
-        for( auto const& users_mp : mount_points ) {
-            if ( !fs::exists( users_mp.host_path ) ) {
-                std::stringstream ss;
-                ss << "Failed: mount dir you specified is not found. "
-                   << users_mp.host_path;
-                throw std::runtime_error( ss.str() );
-            }
-
-            auto const in_container_mount_point = fs::path(".") / users_mp.guest_path;
-            unsigned long mountflags = MS_BIND | MS_NOSUID | MS_NODEV;
-            if ( users_mp.is_readonly ) {
-                mountflags |= MS_RDONLY;
-            }
-
-            mount_directory(
-                users_mp.host_path,
-                in_container_mount_point,
-                nullptr,
-                mountflags
-                );
-            change_directory_owner_rec( in_container_mount_point, user );
-        }
-
-        //
-        mount_procfs( guest_proc_path );
-        mount_tmpfs( guest_tmp_path );
-
-        // copy user's dirs
-        for( auto const& users_cp : copy_points ) {
-            if ( !fs::exists( users_cp.host_path ) ) {
-                std::stringstream ss;
-                ss << "Failed: copy file you specified is not found. "
-                   << users_cp.host_path;
-                throw std::runtime_error( ss.str() );
-            }
-
-            auto const in_container_copy_point = fs::path(".") / users_cp.guest_path;
-            copy_user_files(
-                users_cp.host_path,
-                in_container_copy_point
-                );
-            change_directory_owner_rec( in_container_copy_point, user );
-        }
-
-        //
-        make_standard_nodes( guest_dev_path, fs::perms( 0555 ) );
-
-        //
-        link_io( guest_proc_path, guest_dev_path );
-    }
-
-    template<typename MountPoints, typename CopyPoints>
-    void make_jail_environment(
-        fs::path const& host_container_dir,
-        MountPoints const& mount_points,
-        CopyPoints const& copy_points,
-        linux::user const& user
-        )
-    {
-        std::cerr << "make_jail_environment" << std::endl;
-
-        // create container dir
-        fs::create_directories( host_container_dir );
-
-        // create/mount/link files
-        create_files_in_jail( host_container_dir, mount_points, copy_points, user );
-    }
-
-
-    template<typename MountPoints, typename CopyPoints>
-    void reset_jail_environment(
-        fs::path const& host_jail_base_path,
-        fs::path const& host_container_dir,
-        MountPoints const& mount_points,
-        CopyPoints const& copy_points
-        )
-    {
-        boost::system::error_code ec;
-
-        // important
-        try {
-            fs::current_path( host_container_dir );
-
-        } catch( fs::filesystem_error const& e ) {
-            std::cerr << "Exception[reset_jail_environment]: "
-                      << e.what() << std::endl;
-            return;
-        }
-
-        //
-        unlink_io( guest_dev_path );
-
-        //
-        remove_standard_nodes( guest_dev_path );
-
-        // remove "copy_point" dir
-        for( auto const& users_cp : copy_points ) {
-            auto const in_container_copy_point = fs::path(".") / users_cp.guest_path;
-
-            if ( !fs::exists( in_container_copy_point, ec ) ) {
-                continue;
-            }
-
-            remove_user_files( in_container_copy_point );
-        }
-
-        //
-        cleanup_directory( guest_tmp_path );
-        cleanup_directory( guest_proc_path );
-
-        //
-        for( auto const& users_mp : mount_points | adap::reversed ) {
-            auto const in_container_mount_point = fs::path(".") / users_mp.guest_path;
-
-            if ( !fs::exists( in_container_mount_point, ec ) ) {
-                continue;
-            }
-
-            cleanup_directory( in_container_mount_point );
-        }
-
-        //
-        for( auto const& host_ro_mount_point : HostReadonlyMountPoints | adap::reversed ) {
-            auto const in_container_mount_point = fs::path(".") / host_ro_mount_point;
-
-            if ( !fs::exists( in_container_mount_point, ec ) ) {
-                continue;
-            }
-
-            cleanup_directory( in_container_mount_point );
-        }
-
-        //
-        try {
-            fs::current_path( host_jail_base_path );
-            remove_container_directory( host_container_dir );
-
-        } catch( fs::filesystem_error const& e ) {
-            std::cerr << "Exception[reset_jail_environment/last]: "
-                      << e.what() << std::endl;
-            return;
-        }
-    }
 
 
     void set_limit( int resource, rlim_t lim_soft, rlim_t lim_hard )
@@ -539,6 +153,11 @@ namespace awaho
         return std::make_tuple( std::move( ptr_list ), argv_buf );
     }
 
+
+
+
+
+
     // this function must be invoked by forked process
     void execute_command_in_jail(
         fs::path const& host_container_dir,
@@ -594,7 +213,9 @@ namespace awaho
 
         // TODO: set umask
 
-        std::system("ls -la /proc/self/fd");
+
+
+        // std::system("ls -la /proc/self/fd");
 
         // redirect: pipes[debug]
         for( auto const& pr : opts.pipe_redirects ) {
@@ -655,6 +276,8 @@ namespace awaho
         auto envp_pack = make_buffer_for_execve( opts.envs );
         auto& envp = std::get<0>( envp_pack );
 
+
+
         // replace self process
         if ( ::execve( filename.c_str(), argv.data(), envp.data() ) == -1 ) {
             std::stringstream ss;
@@ -681,93 +304,264 @@ namespace awaho
         comm_info_t* comm_info;
     };
 
-    // this function must be invoked by forked process
-    int execute_command_in_jail_entry( void* raw_args )
+    void child_process(
+        fs::path const& host_container_dir,
+        container_options_t const& opts,
+        linux::user const& user,
+        comm_info_t& comm_info
+        )
+    try {
+        execute_command_in_jail( host_container_dir, opts, user );
+        // after this, stdio should not be used, because they may be redirected
+
+    } catch( fs::filesystem_error const& e ) {
+        // TODO: error handling
+        comm_info.error_status = 100;
+        std::strncpy( comm_info.message, e.what(), comm_info_t::BufferLength - 1 );
+
+    } catch( std::exception const& e ) {
+        comm_info.error_status = 200;
+        std::strncpy( comm_info.message, e.what(), comm_info_t::BufferLength - 1 );
+
+    } catch(...) {
+        comm_info.error_status = 300;
+        std::strncpy(
+            comm_info.message,
+            "Unexpected exception[execute_command_in_jail_entry]",
+            comm_info_t::BufferLength - 1
+            );
+    }
+
+    void wait_pid_with_monitor(
+        int const pid,
+        std::promise<boost::optional<executed_result>> p
+        )
+    {
+        int child_status;
+        ::rusage usage;
+
+        if ( ::wait4( pid, &child_status, 0, &usage ) == -1 ) {
+            std::cerr << "Failed to waitpid. errno=" << errno << " : " << std::strerror(errno) << std::endl;
+            p.set_value( boost::none );
+            return;
+        }
+
+        auto const user_time_micro_sec =
+            static_cast<double>( usage.ru_utime.tv_sec ) * 1e6 + static_cast<double>( usage.ru_utime.tv_usec );
+        auto const system_time_micro_sec =
+            static_cast<double>( usage.ru_stime.tv_sec ) * 1e6 + static_cast<double>( usage.ru_stime.tv_usec );
+
+        auto const cpu_time_micro_sec = user_time_micro_sec + system_time_micro_sec;
+
+        auto const used_memory_bytes = static_cast<unsigned long long>( usage.ru_maxrss ) * 1024;  // units is KB
+
+        auto result = executed_result{
+            WIFEXITED(child_status),
+            WEXITSTATUS(child_status),
+            WIFSIGNALED(child_status),
+            WTERMSIG(child_status),
+            user_time_micro_sec,
+            system_time_micro_sec,
+            cpu_time_micro_sec,
+            used_memory_bytes
+        };
+        p.set_value( std::move( result ) );
+    }
+
+
+    auto export_result_to_fd(
+        executed_result const& child_result,
+        container_options_t const& opts,
+        comm_info_t const& comm_info
+        )
+        -> bool
+    {
+        std::cout << "parent process: child finished / " << std::endl
+                  << child_result << std::endl;
+
+        auto const close_flag = ( opts.result_output_fd > 2 )
+            ? bio::file_descriptor_flags::close_handle
+            : bio::file_descriptor_flags::never_close_handle
+            ;
+        bio::stream<bio::file_descriptor_sink> ofs( opts.result_output_fd, close_flag );
+        if ( !ofs ) {
+            std::cerr << "parent process: child finished :: failed to create result" << std::endl;
+            return false;
+        }
+
+        if ( opts.result_output_type == "json" ) {
+            picojson::value::object obj{
+                { "exited", picojson::value( child_result.exited ) },
+                { "exitStatus", picojson::value( static_cast<double>( child_result.exit_status ) ) },
+                { "signaled", picojson::value( child_result.signaled ) },
+                { "signal", picojson::value( static_cast<double>( child_result.signal ) ) },
+
+                { "userTimeMicroSec", picojson::value( child_result.user_time_micro_sec ) },
+                { "systemTimeMicroSec", picojson::value( child_result.system_time_micro_sec ) },
+                { "cpuTimeMicroSec", picojson::value( child_result.cpu_time_micro_sec ) },
+                { "usedMemoryBytes", picojson::value( static_cast<double>( child_result.used_memory_bytes ) ) },
+
+                { "systemErrorStatus", picojson::value( static_cast<double>( comm_info.error_status ) ) },
+                { "systemErrorMessage", picojson::value( comm_info.message ) },
+            };
+            picojson::value root( obj );
+
+            root.serialize( std::ostream_iterator<char>( ofs ) );
+
+        } else {
+            std::cerr << "Error: type " << opts.result_output_type << " is not supported" << std::endl;
+            return false;
+        }
+
+        return true;
+    }
+
+
+    // this function must be invoked by cloned process
+    int execute_command_in_jail_entry(
+        fs::path const& host_container_dir,
+        container_options_t const& opts,
+        linux::user const& user,
+        comm_info_t& comm_info
+        )
+    {
+        // fork process that executes sandboxed process
+        auto const pid = ::fork();
+        if ( pid == -1 ) {
+            // error
+            comm_info.error_status = 10;
+            std::strncpy(
+                comm_info.message,
+                "Failed to fork",
+                comm_info_t::BufferLength - 1
+                );
+            return -1;
+        }
+
+        if ( pid == 0 ) {
+            // child process
+            child_process( host_container_dir, opts, user, comm_info );
+
+            // if reached to here, maybe error...
+            std::exit( -100 );    // never call destructor of stack objects(Ex. anon_user)
+        }
+
+        // parent process
+
+        std::promise<boost::optional<executed_result>> p;
+        auto f = p.get_future();
+
+        //
+        std::thread th( wait_pid_with_monitor, pid, std::move( p ) );
+        if ( opts.limits.cputime ) {
+            // realtime checking apart from cgroup limits
+            // prevent sleep() function running infinite
+            // +4 is extention...
+            auto const span
+                = std::chrono::seconds{ *opts.limits.cputime + 4 };
+            if ( f.wait_for( span ) == std::future_status::timeout ) {
+                std::cout << "Timer timeout!" << std::endl;
+
+                if ( ::kill( pid, SIGKILL ) == -1 ) {
+                    std::cerr << "Failed to kill child."
+                              << " errno=" << errno
+                              << " : " << std::strerror(errno) << std::endl;
+                    return -1;
+                }
+            }
+        }
+
+        // wait for result, blocking
+        auto const child_result = f.get();
+        th.join();
+
+        if ( child_result ) {
+            export_result_to_fd( *child_result, opts, comm_info );
+
+        } else {
+            std::cerr << "parent process: child finished :: failed to waitpid" << std::endl;
+            return -1;
+        }
+
+        return 0;
+    }
+
+
+
+
+
+
+
+    // this function must be invoked by cloned process
+    int cloned_entry_point( void* raw_args )
     {
         arguments_for_jail const* const args =
             static_cast<arguments_for_jail const*>( raw_args );
-
         fs::path const& host_container_dir
             = *args->p_host_container_dir;
         container_options_t const& opts
             = *args->p_opts;
         linux::user const& user
             = *args->p_user;
-        comm_info_t& comm_info = *args->comm_info;
 
-        try {
-            execute_command_in_jail( host_container_dir, opts, user );
-            // after this, stdio should not be used, because they may be redirected
-
-        } catch( fs::filesystem_error const& e ) {
-            // TODO: error handling
-            comm_info.error_status = 100;
-            std::strncpy( comm_info.message, e.what(), comm_info_t::BufferLength - 1 );
-
-        } catch( std::exception const& e ) {
-            comm_info.error_status = 200;
-            std::strncpy( comm_info.message, e.what(), comm_info_t::BufferLength - 1 );
-
-        } catch(...) {
-            comm_info.error_status = 300;
-            std::strncpy(
-                comm_info.message,
-                "Unexpected exception[execute_command_in_jail_entry]",
-                comm_info_t::BufferLength - 1
-                );
+        // make the special pipe close when exec
+        if ( opts.result_output_fd > 2 ) {
+            if ( ::fcntl( opts.result_output_fd, F_SETFD, FD_CLOEXEC ) == -1 ) {
+                return -1;
+            }
         }
 
-        // if reached to here, maybe error...
-        std::exit( -1 );    // never call destructor of stack objects(Ex. anon_user)
+        try {
+            constexpr auto CommBufferSize = 2048;
+
+            // create shared buffer (comm_info)
+            ipc::mapped_region region( ipc::anonymous_shared_memory( CommBufferSize ) );
+            void* const ptr = region.get_address();
+            auto const offset =
+                alignof(comm_info_t) - ( reinterpret_cast<std::uintptr_t>( ptr ) % alignof(comm_info_t) );
+            auto const free_size = CommBufferSize - offset;
+            if ( free_size < sizeof(comm_info_t) ) {
+                // throw
+                return -10;
+            }
+
+            void* aligned_ptr = static_cast<void*>( static_cast<char*>( ptr ) + offset );
+            auto comm_info_p = new(aligned_ptr) comm_info_t{};  // value initialize
+
+            return execute_command_in_jail_entry(
+                host_container_dir,
+                opts,
+                user,
+                *comm_info_p
+                );
+
+        } catch( ipc::interprocess_exception const& ex ) {
+            std::cerr << "ipc error: " << ex.what() << std::endl;
+            return -1;
+
+        } catch(...) {
+            std::cerr << "unknown" << std::endl;
+            return -2;
+        }
+
+        std::cout << "wait_pid_with_monitor finished" << std::endl;
+        return 0;
     }
-
-    struct executed_result
-    {
-        bool exited;
-        int exit_status;
-        bool signaled;
-        int signal;
-        double user_time_micro_sec;
-        double system_time_micro_sec;
-        double cpu_time_micro_sec;
-        unsigned long long used_memory_bytes;
-    };
-
-    std::ostream& operator<<( std::ostream& os, executed_result const& res )
-    {
-        os << "exited: " << res.exited << std::endl
-           << "exit_status:  " << res.exit_status << std::endl
-           << "signaled: " << res.signaled << std::endl
-           << "signal: " << res.signal << std::endl
-           << "user_time_micro_sec: " << res.user_time_micro_sec << std::endl
-           << "system_time_micro_sec: " << res.system_time_micro_sec << std::endl
-           << "cpu_time_micro_sec: " << res.cpu_time_micro_sec << std::endl
-           << "used_memory_bytes: " << res.used_memory_bytes << std::endl
-            ;
-
-        return os;
-    }
-
 
     // TODO: exception handling
-    void run_in_container( container_options_t const& opts )
+    int run_in_container( container_options_t const& opts )
     {
         std::cout << "Host base dir: " << opts.host_containers_base_dir << std::endl;
 
         expect_root();
 
-        // make the special pipe close when exec
-        if ( opts.result_output_fd > 2 ) {
-            if ( ::fcntl( opts.result_output_fd, F_SETFD, FD_CLOEXEC ) == -1 ) {
-                // throw
-            }
-        }
+
 
         // make user
         auto const anon_user = make_anonymous_user();
         if ( anon_user == boost::none ) {
             std::cerr << "Failed to create user" << std::endl;
-            // throw
+            return -2;
         }
         assert( anon_user->valid() );
 
@@ -787,151 +581,32 @@ namespace awaho
         std::size_t const stack_for_child_size = opts.stack_size;
         auto stack_for_child = new std::uint8_t[stack_for_child_size];
 
-        try{
-            constexpr auto CommBufferSize = 2048;
-
-            // create shared buffer (comm_info)
-            ipc::mapped_region region( ipc::anonymous_shared_memory( CommBufferSize ) );
-            void* const ptr = region.get_address();
-            auto const offset =
-                alignof(comm_info_t) - ( reinterpret_cast<std::uintptr_t>( ptr ) % alignof(comm_info_t) );
-            auto const free_size = CommBufferSize - offset;
-            if ( free_size < sizeof(comm_info_t) ) {
-                // throw
-            }
-
-            void* aligned_ptr = static_cast<void*>( static_cast<char*>( ptr ) + offset );
-            auto comm_info_p = new(aligned_ptr) comm_info_t{};  // value initialize
-
-            //
-            auto args = arguments_for_jail {
-                &host_container_dir,
-                &opts,
-                &*anon_user,
-                comm_info_p
-            };
-            // create the process that executes jailed command!
-            pid_t const pid = ::clone(
-                &execute_command_in_jail_entry,
-                stack_for_child + stack_for_child_size,
-                CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | SIGCHLD | CLONE_UNTRACED/* | CLONE_NEWUSER*/,
-                &args
-                );
-            if ( pid == -1 ) {
-                std::cerr << "Clone failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-                return;
-            }
-
-            // parent process
-            std::cout << "parent process" << std::endl;
-
-            std::promise<boost::optional<executed_result>> p;
-            auto f = p.get_future();
-
-            std::thread th(
-                [pid]( std::promise<boost::optional<executed_result>> p ) {
-                    int child_status;
-                    ::rusage usage;
-
-                    if ( ::wait4( pid, &child_status, 0, &usage ) == -1 ) {
-                        std::cerr << "Failed to waitpid. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-                        p.set_value( boost::none );
-                        return;
-                    }
-
-                    auto const user_time_micro_sec =
-                        static_cast<double>( usage.ru_utime.tv_sec ) * 1e6 + static_cast<double>( usage.ru_utime.tv_usec );
-                    auto const system_time_micro_sec =
-                        static_cast<double>( usage.ru_stime.tv_sec ) * 1e6 + static_cast<double>( usage.ru_stime.tv_usec );
-
-                    auto const cpu_time_micro_sec = user_time_micro_sec + system_time_micro_sec;
-
-                    auto const used_memory_bytes = static_cast<unsigned long long>( usage.ru_maxrss ) * 1024;  // units is KB
-
-                    auto result = executed_result{
-                        WIFEXITED(child_status),
-                        WEXITSTATUS(child_status),
-                        WIFSIGNALED(child_status),
-                        WTERMSIG(child_status),
-                        user_time_micro_sec,
-                        system_time_micro_sec,
-                        cpu_time_micro_sec,
-                        used_memory_bytes
-                    };
-                    p.set_value( std::move( result ) );
-                },
-                std::move( p )
-                );
-
-
-            if ( opts.limits.cputime ) {
-                // realtime checking apart from cgroup limits
-                // prevent sleep() function running infinite
-                // +4 is extention...
-                auto const span
-                    = std::chrono::seconds{ *opts.limits.cputime + 4 };
-                if ( f.wait_for( span ) == std::future_status::timeout ) {
-                    std::cout << "Timer timeout!" << std::endl;
-
-                    if ( ::kill( pid, SIGKILL ) == -1 ) {
-                        std::cerr << "Failed to kill child."
-                                  << " errno=" << errno
-                                  << " : " << std::strerror(errno) << std::endl;
-                    }
-                }
-            }
-
-            // wait for result, blocking
-            auto const child_result = f.get();
-            th.join();
-
-            std::cout << "waitpid finished" << std::endl;
-
-            //
-            if ( child_result ) {
-                std::cout << "parent process: child finished / " << std::endl
-                          << *child_result << std::endl;
-
-                auto const close_flag = ( opts.result_output_fd > 2 )
-                    ? bio::file_descriptor_flags::close_handle
-                    : bio::file_descriptor_flags::never_close_handle
-                    ;
-                bio::stream<bio::file_descriptor_sink> ofs( opts.result_output_fd, close_flag );
-                if ( !ofs ) {
-                    std::cerr << "parent process: child finished :: failed to create result" << std::endl;
-                }
-
-                if ( opts.result_output_type == "json" ) {
-                    picojson::value::object obj{
-                        { "exited", picojson::value( child_result->exited ) },
-                        { "exitStatus", picojson::value( static_cast<double>( child_result->exit_status ) ) },
-                        { "signaled", picojson::value( child_result->signaled ) },
-                        { "signal", picojson::value( static_cast<double>( child_result->signal ) ) },
-
-                        { "userTimeMicroSec", picojson::value( child_result->user_time_micro_sec ) },
-                        { "systemTimeMicroSec", picojson::value( child_result->system_time_micro_sec ) },
-                        { "cpuTimeMicroSec", picojson::value( child_result->cpu_time_micro_sec ) },
-                        { "usedMemoryBytes", picojson::value( static_cast<double>( child_result->used_memory_bytes ) ) },
-
-                        { "systemErrorStatus", picojson::value( static_cast<double>( comm_info_p->error_status ) ) },
-                        { "systemErrorMessage", picojson::value( comm_info_p->message ) },
-                    };
-                    picojson::value root( obj );
-
-                    root.serialize( std::ostream_iterator<char>( ofs ) );
-
-                } else {
-                    std::cerr << "Error: type " << opts.result_output_type << " is not supported" << std::endl;
-
-                }
-
-            } else {
-                std::cerr << "parent process: child finished :: failed to waitpid" << std::endl;
-            }
-
-        } catch( ipc::interprocess_exception const& ex ) {
-            std::cerr << "ipc error: " << ex.what() << std::endl;
+        //
+        auto args = arguments_for_jail {
+            &host_container_dir,
+            &opts,
+            &*anon_user
+        };
+        // create the process that executes jailed command!
+        pid_t const pid = ::clone(
+            &cloned_entry_point,
+            stack_for_child + stack_for_child_size,
+            CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWNET | CLONE_NEWIPC | CLONE_NEWUTS | SIGCHLD | CLONE_UNTRACED/* | CLONE_NEWUSER*/,
+            &args
+            );
+        if ( pid == -1 ) {
+            std::cerr << "Clone failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
+            return -3;
         }
+
+        // blocking, wait for cloned process
+        int status;
+        if ( waitpid( pid, &status, 0) == -1 ) {
+            std::cerr << "waitpid failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
+            return -4;
+        }
+
+        return status;
     }
 
     static const std::array<int, 7> IgnSignals{{
@@ -956,9 +631,8 @@ namespace awaho
         }
 
         std::cout << opts << std::endl;
-        run_in_container( opts );
 
-        return 0;
+        return run_in_container( opts );
 
     } catch( std::exception const& e ) {
         std::cerr << "Exception[execute]: " << e.what() << std::endl;
