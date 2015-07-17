@@ -5,9 +5,6 @@
 // (See accompanying file LICENSE_1_0.txt or copy at
 // http://www.boost.org/LICENSE_1_0.txt)
 //
-#include "virtual_root.hpp"
-#include "file_manip.hpp"
-#include "container_options.hpp"
 
 #include <iostream>
 #include <memory>
@@ -16,7 +13,6 @@
 #include <cstdlib>
 
 #include <sys/types.h>
-#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -30,6 +26,7 @@
 #include <boost/program_options.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 #include <boost/range/adaptor/indexed.hpp>
+#include <boost/range/algorithm_ext/erase.hpp>
 
 #include <boost/scope_exit.hpp>
 #include <boost/optional.hpp>
@@ -40,19 +37,18 @@
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/file_descriptor.hpp>
 
-#include <boost/range/algorithm_ext/erase.hpp>
-
-#include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/stat.h>
 
 #include <chrono>
 #include <thread>
-#include <atomic>
 #include <future>
 
 #include "user.hpp"
 #include "utility.hpp"
+#include "jailed_command_executor.hpp"
+#include "virtual_root.hpp"
+#include "container_options.hpp"
 
 #include "ext/picojson.h"
 
@@ -91,162 +87,6 @@ namespace awaho
         return os;
     }
 
-
-
-
-    void set_limit( int resource, rlim_t lim_soft, rlim_t lim_hard )
-    {
-        assert( lim_hard >= lim_soft);
-
-        auto limits = ::rlimit{ lim_soft, lim_hard };
-        if ( ::setrlimit( resource, &limits ) == -1 ) {
-            std::stringstream ss;
-            ss << "Failed to set_limit: "
-               << resource << " : " << lim_soft << " / " << lim_hard
-               << " errno=" << errno << " : " << std::strerror( errno );
-            throw std::runtime_error( ss.str() );
-        }
-    }
-
-    void set_limit( int resource, rlim_t lim )
-    {
-        set_limit( resource, lim, lim );
-    }
-
-
-    // this function must be invoked by forked process
-    void execute_command_in_jail(
-        fs::path const& host_container_dir,
-        container_options_t const& opts,
-        linux::user const& user
-        )
-    {
-        // create virtual root for container
-        construct_virtual_root(
-            host_container_dir,
-            opts.mount_points,
-            opts.copy_points,
-            user
-            );
-
-        // into jail
-        if ( ::chroot( host_container_dir.c_str() ) == -1 ) {
-            std::stringstream ss;
-            ss << "Failed to chroot: "
-               << " errno=" << errno << " : " << std::strerror( errno );
-            throw std::runtime_error( ss.str() );
-        }
-
-        // move to home
-        fs::current_path( opts.in_container_start_path );
-
-        // set limits
-        if ( opts.limits.core ) {
-            set_limit( RLIMIT_CORE, *opts.limits.core );
-        }
-        if ( opts.limits.nofile ) {
-            set_limit( RLIMIT_NOFILE, *opts.limits.nofile );
-        }
-        if ( opts.limits.nproc ) {
-            set_limit( RLIMIT_NPROC, *opts.limits.nproc );
-        }
-        if ( opts.limits.memlock ) {
-            set_limit( RLIMIT_MEMLOCK, *opts.limits.memlock );
-        }
-        if ( opts.limits.cputime ) {
-            // CPU can be used only cpu_limit_time(sec)
-            set_limit( RLIMIT_CPU, *opts.limits.cputime, *opts.limits.cputime + 3 );
-        }
-        if ( opts.limits.memory ) {
-            // Memory can be used only memory_limit_bytes [be careful!]
-            set_limit( RLIMIT_AS, *opts.limits.memory, *opts.limits.memory * 1.2 );
-        }
-        if ( opts.limits.fsize ) {
-            set_limit( RLIMIT_FSIZE, *opts.limits.fsize );
-        }
-
-        set_limit( RLIMIT_STACK, opts.stack_size );
-
-        // log
-        std::cout << "[+] chrooted and resource limited!" << std::endl;
-
-        // TODO: set umask
-
-
-
-        // std::system("ls -la /proc/self/fd");
-
-        // redirect: pipes[debug]
-        for( auto const& pr : opts.pipe_redirects ) {
-            std::cout << "==> host fd: " << pr.host_fd
-                      << " will recieve data of child fd: " << pr.guest_fd
-                      << std::endl;
-        }
-
-        // redirect: pipes
-        for( auto const& pr : opts.pipe_redirects ) {
-            if ( ::dup2( pr.host_fd, pr.guest_fd ) == -1 ) {
-                std::stringstream ss;
-                ss << "Failed to dup2: "
-                   << " errno=" << errno << " : " << std::strerror( errno );
-                throw std::runtime_error( ss.str() );
-            }
-
-            if ( ::close( pr.host_fd ) == -1 ) {
-                std::stringstream ss;
-                ss << "Failed to close the host pipe: "
-                   << " errno=" << errno << " : " << std::strerror( errno );
-                throw std::runtime_error( ss.str() );
-            }
-        }
-
-        // === discard privilege
-        // change group
-        if ( ::setresgid( user.group_id(), user.group_id(), user.group_id() ) == -1 ) {
-            std::stringstream ss;
-            ss << "Failed to setresgid: "
-               << " errno=" << errno << " : " << std::strerror( errno );
-            throw std::runtime_error( ss.str() );
-        }
-
-        // change user
-        if ( ::setresuid( user.user_id(), user.user_id(), user.user_id() ) == -1 ) {
-            std::stringstream ss;
-            ss << "Failed to setresuid: "
-               << " errno=" << errno << " : " << std::strerror( errno );
-            throw std::runtime_error( ss.str() );
-        }
-        // ===
-
-        // ==
-        // now I am in the sandbox!
-        // ==
-        if ( opts.commands.size() < 1 ) {
-            std::stringstream ss;
-            ss << "Failed to prepare environment: commands must have >= 1 elements (" << opts.commands.size() << ")";
-            throw std::runtime_error( ss.str() );
-        }
-
-        auto const& filename = opts.commands[0];
-
-        auto argv_pack = make_buffer_for_execve( opts.commands );
-        auto& argv = std::get<0>( argv_pack );
-
-        auto envp_pack = make_buffer_for_execve( opts.envs );
-        auto& envp = std::get<0>( envp_pack );
-
-
-
-        // replace self process
-        if ( ::execve( filename.c_str(), argv.data(), envp.data() ) == -1 ) {
-            std::stringstream ss;
-            ss << "Failed to execve: "
-               << " errno=" << errno << " : " << std::strerror( errno );
-            throw std::runtime_error( ss.str() );
-        }
-    }
-
-
     struct comm_info_t
     {
         static constexpr std::size_t BufferLength = 2000;
@@ -255,43 +95,8 @@ namespace awaho
         char message[BufferLength];
     };
 
-    struct arguments_for_jail
-    {
-        fs::path const* const p_host_container_dir;
-        container_options_t const* const p_opts;
-        linux::user const* const p_user;
-        comm_info_t* comm_info;
-    };
 
-    void child_process(
-        fs::path const& host_container_dir,
-        container_options_t const& opts,
-        linux::user const& user,
-        comm_info_t& comm_info
-        )
-    try {
-        execute_command_in_jail( host_container_dir, opts, user );
-        // after this, stdio should not be used, because they may be redirected
-
-    } catch( fs::filesystem_error const& e ) {
-        // TODO: error handling
-        comm_info.error_status = 100;
-        std::strncpy( comm_info.message, e.what(), comm_info_t::BufferLength - 1 );
-
-    } catch( std::exception const& e ) {
-        comm_info.error_status = 200;
-        std::strncpy( comm_info.message, e.what(), comm_info_t::BufferLength - 1 );
-
-    } catch(...) {
-        comm_info.error_status = 300;
-        std::strncpy(
-            comm_info.message,
-            "Unexpected exception[execute_command_in_jail_entry]",
-            comm_info_t::BufferLength - 1
-            );
-    }
-
-    void wait_pid_with_monitor(
+    void monitor_pid(
         int const pid,
         std::promise<boost::optional<executed_result>> p
         )
@@ -327,7 +132,6 @@ namespace awaho
         p.set_value( std::move( result ) );
     }
 
-
     auto export_result_to_fd(
         executed_result const& child_result,
         container_options_t const& opts,
@@ -335,16 +139,13 @@ namespace awaho
         )
         -> bool
     {
-        std::cout << "parent process: child finished / " << std::endl
-                  << child_result << std::endl;
-
         auto const close_flag = ( opts.result_output_fd > 2 )
             ? bio::file_descriptor_flags::close_handle
             : bio::file_descriptor_flags::never_close_handle
             ;
         bio::stream<bio::file_descriptor_sink> ofs( opts.result_output_fd, close_flag );
         if ( !ofs ) {
-            std::cerr << "parent process: child finished :: failed to create result" << std::endl;
+            std::cerr << "Failed to create fd stream" << std::endl;
             return false;
         }
 
@@ -377,7 +178,7 @@ namespace awaho
 
 
     // this function must be invoked by cloned process
-    int execute_command_in_jail_entry(
+    int execute_command_with_monitor(
         fs::path const& host_container_dir,
         container_options_t const& opts,
         linux::user const& user,
@@ -394,62 +195,70 @@ namespace awaho
                 "Failed to fork",
                 comm_info_t::BufferLength - 1
                 );
-            return -1;
+            return -30;
         }
 
         if ( pid == 0 ) {
-            // child process
-            child_process( host_container_dir, opts, user, comm_info );
+            // if succeeded, this function is 'noreturn'
+            execute_command_in_jail_entry( host_container_dir, opts, user, comm_info );
 
             // if reached to here, maybe error...
             std::exit( -100 );    // never call destructor of stack objects(Ex. anon_user)
-        }
-
-        // parent process
-
-        std::promise<boost::optional<executed_result>> p;
-        auto f = p.get_future();
-
-        //
-        std::thread th( wait_pid_with_monitor, pid, std::move( p ) );
-        if ( opts.limits.cputime ) {
-            // realtime checking apart from cgroup limits
-            // prevent sleep() function running infinite
-            // +4 is extention...
-            auto const span
-                = std::chrono::seconds{ *opts.limits.cputime + 4 };
-            if ( f.wait_for( span ) == std::future_status::timeout ) {
-                std::cout << "Timer timeout!" << std::endl;
-
-                if ( ::kill( pid, SIGKILL ) == -1 ) {
-                    std::cerr << "Failed to kill child."
-                              << " errno=" << errno
-                              << " : " << std::strerror(errno) << std::endl;
-                    return -1;
-                }
-            }
-        }
-
-        // wait for result, blocking
-        auto const child_result = f.get();
-        th.join();
-
-        if ( child_result ) {
-            export_result_to_fd( *child_result, opts, comm_info );
 
         } else {
-            std::cerr << "parent process: child finished :: failed to waitpid" << std::endl;
-            return -1;
-        }
+            // parent process(monitor)
+            std::promise<boost::optional<executed_result>> p;
+            auto f = p.get_future();
 
-        return 0;
+            //
+            std::thread th( monitor_pid, pid, std::move( p ) );
+            if ( opts.limits.cputime ) {
+                // realtime checking apart from cgroup limits
+                // prevent sleep() function running infinite
+                // +3 is extention...
+                auto const span
+                    = std::chrono::seconds{ *opts.limits.cputime + 3 };
+                if ( f.wait_for( span ) == std::future_status::timeout ) {
+                    std::cout << "Timer timeout!" << std::endl;
+
+                    // timeouted, so kill the child
+                    if ( ::kill( pid, SIGKILL ) == -1 ) {
+                        std::cerr << "Failed to kill child."
+                                  << " errno=" << errno
+                                  << " : " << std::strerror(errno) << std::endl;
+                        return -31;
+                    }
+                }
+            }
+
+            // wait for result, blocking
+            auto const child_result = f.get();
+            th.join();
+
+            if ( child_result ) {
+                std::cout << "[+] Monitor: child process is finished" << std::endl
+                          << *child_result << std::endl;
+
+                if ( !export_result_to_fd( *child_result, opts, comm_info ) ) {
+                    return -32;
+                }
+
+            } else {
+                std::cerr << "parent process: child finished :: failed to waitpid" << std::endl;
+                return -33;
+            }
+
+            return 0;
+        }
     }
 
 
-
-
-
-
+    struct arguments_for_jail
+    {
+        fs::path const* const p_host_container_dir;
+        container_options_t const* const p_opts;
+        linux::user const* const p_user;
+    };
 
     // this function must be invoked by cloned process
     int cloned_entry_point( void* raw_args )
@@ -466,7 +275,9 @@ namespace awaho
         // make the special pipe close when exec
         if ( opts.result_output_fd > 2 ) {
             if ( ::fcntl( opts.result_output_fd, F_SETFD, FD_CLOEXEC ) == -1 ) {
-                return -1;
+                std::cerr << "Failed to set FD_CLOEXEC to fd("
+                          << opts.result_output_fd << ")" << std::endl;
+                return -20;
             }
         }
 
@@ -480,14 +291,14 @@ namespace awaho
                 alignof(comm_info_t) - ( reinterpret_cast<std::uintptr_t>( ptr ) % alignof(comm_info_t) );
             auto const free_size = CommBufferSize - offset;
             if ( free_size < sizeof(comm_info_t) ) {
-                // throw
-                return -10;
+                std::cerr << "Invalid object size" << std::endl;
+                return -21;
             }
 
             void* aligned_ptr = static_cast<void*>( static_cast<char*>( ptr ) + offset );
             auto comm_info_p = new(aligned_ptr) comm_info_t{};  // value initialize
 
-            return execute_command_in_jail_entry(
+            return execute_command_with_monitor(
                 host_container_dir,
                 opts,
                 user,
@@ -495,17 +306,15 @@ namespace awaho
                 );
 
         } catch( ipc::interprocess_exception const& ex ) {
-            std::cerr << "ipc error: " << ex.what() << std::endl;
-            return -1;
+            std::cerr << "IPC error: " << ex.what() << std::endl;
+            return -22;
 
         } catch(...) {
-            std::cerr << "unknown" << std::endl;
-            return -2;
+            std::cerr << "Unknown exception" << std::endl;
+            return -23;
         }
-
-        std::cout << "wait_pid_with_monitor finished" << std::endl;
-        return 0;
     }
+
 
     static const std::array<int, 7> IgnSignals{{
         SIGHUP,
@@ -528,20 +337,19 @@ namespace awaho
         }
     }
 
-    // TODO: exception handling
+
     int run_in_container( container_options_t const& opts )
     {
         std::cout << "Host base dir: " << opts.host_containers_base_dir << std::endl;
 
+        // TODO: fix
         expect_root();
-
-
 
         // make user
         auto const anon_user = make_anonymous_user();
         if ( anon_user == boost::none ) {
             std::cerr << "Failed to create user" << std::endl;
-            return -2;
+            return -10;
         }
         assert( anon_user->valid() );
 
@@ -558,6 +366,8 @@ namespace awaho
                 );
         };
 
+        // TODO: change process name
+
         std::size_t const stack_for_child_size = opts.stack_size;
         auto stack_for_child = new std::uint8_t[stack_for_child_size];
 
@@ -567,7 +377,8 @@ namespace awaho
             &opts,
             &*anon_user
         };
-        // create the process that executes jailed command!
+        // create the process that executes jailed command with monitor
+        // namespaces are separated
         pid_t const pid = ::clone(
             &cloned_entry_point,
             stack_for_child + stack_for_child_size,
@@ -576,29 +387,24 @@ namespace awaho
             );
         if ( pid == -1 ) {
             std::cerr << "Clone failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return -3;
+            return -11;
         }
 
+        // to execute destructor when signal raised
         ignore_signals();
 
         // blocking, wait for cloned process[monitor root]
         int status;
-        if ( waitpid( pid, &status, 0) == -1 ) {
+        if ( waitpid( pid, &status, 0 ) == -1 ) {
             std::cerr << "waitpid failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
-            return -4;
+            return -12;
         }
 
         return status;
     }
 
-
-
-
-
     int execute( container_options_t const& opts ) noexcept
     try {
-
-
         std::cout << opts << std::endl;
 
         return run_in_container( opts );

@@ -250,7 +250,7 @@ namespace awaho
             fs::current_path( host_container_dir );
 
         } catch( fs::filesystem_error const& e ) {
-            std::cerr << "Exception[reset_jail_environment]: "
+            std::cerr << "Exception[destruct_virtual_root]: "
                       << e.what() << std::endl;
             return;
         }
@@ -304,7 +304,7 @@ namespace awaho
             remove_container_directory( host_container_dir );
 
         } catch( fs::filesystem_error const& e ) {
-            std::cerr << "Exception[reset_jail_environment/last]: "
+            std::cerr << "Exception[destruct_virtual_root/last]: "
                       << e.what() << std::endl;
             return;
         }
