@@ -68,17 +68,17 @@ namespace awaho
 
         for( auto&& it : boost::make_iterator_range( begin, end ) ) {
             auto const& p = it.path();
-            std::cout << "-> " << p << std::endl;
 
             if ( fs::is_symlink( p ) ) {
                 // TODO: unlink
+                std::cout << "Not implemented: unlink " << p << std::endl;
 
             } else if ( fs::is_directory( p ) ) {
                 remove_container_directory( p, rm_f );
 
             } else if ( fs::is_regular_file( p ) ) {
                 // TODO: remove
-
+                std::cout << "Not implemented: rm " << p << std::endl;
             }
         }
 
