@@ -5,7 +5,7 @@
 // (See accompanying file LICENSE_1_0.txt or copy at
 // http://www.boost.org/LICENSE_1_0.txt)
 //
-#include "container_environment.hpp"
+#include "virtual_root.hpp"
 #include "file_manip.hpp"
 #include "container_options.hpp"
 
@@ -114,50 +114,6 @@ namespace awaho
     }
 
 
-    template<typename V>
-    auto make_buffer_for_execve(
-        V const& data_set
-        )
-        -> std::tuple<std::vector<char*>, std::shared_ptr<char>>
-    {
-        std::vector<char*> ptr_list(
-            data_set.size() + 1,
-            nullptr
-            ); // +1 is for termination
-
-        auto const cont_buf_len =
-            std::accumulate( data_set.cbegin(), data_set.cend(),
-                             0, []( std::size_t const& len, std::string const& r ) {
-                                 return len + ( r.size() + 1 );     // length + EOF
-                             });
-
-        // 0 filled continuous buffer
-        std::shared_ptr<char> argv_buf(
-            new char[cont_buf_len]{},
-            std::default_delete<char[]>()
-            );
-
-        std::size_t argv_cur_len = 0;
-        for( auto&& im : data_set | adap::indexed( 0 ) ) {
-            // current ptr in continuous buffer
-            char* const cur_ptr = argv_buf.get() + argv_cur_len;
-
-            std::copy( im.value().cbegin(), im.value().cend(), cur_ptr );
-
-            ptr_list[im.index()] = cur_ptr;
-
-            argv_cur_len += im.value().size() + 1;  // +1 is EOF
-        }
-        assert( argv_cur_len == cont_buf_len );
-
-        return std::make_tuple( std::move( ptr_list ), argv_buf );
-    }
-
-
-
-
-
-
     // this function must be invoked by forked process
     void execute_command_in_jail(
         fs::path const& host_container_dir,
@@ -165,8 +121,8 @@ namespace awaho
         linux::user const& user
         )
     {
-        // make environment
-        make_jail_environment(
+        // create virtual root for container
+        construct_virtual_root(
             host_container_dir,
             opts.mount_points,
             opts.copy_points,
@@ -210,6 +166,9 @@ namespace awaho
         }
 
         set_limit( RLIMIT_STACK, opts.stack_size );
+
+        // log
+        std::cout << "[+] chrooted and resource limited!" << std::endl;
 
         // TODO: set umask
 
@@ -548,6 +507,27 @@ namespace awaho
         return 0;
     }
 
+    static const std::array<int, 7> IgnSignals{{
+        SIGHUP,
+        SIGINT,
+        SIGQUIT,
+        SIGPIPE,
+        SIGTERM,
+        SIGXCPU,
+        SIGXFSZ
+    }};
+    void ignore_signals()
+    {
+        for( auto&& sig : IgnSignals ) {
+            if ( ::signal( sig, SIG_IGN ) == SIG_ERR ) {
+                std::stringstream ss;
+                ss << "Failed to signal: " << sig
+                   << " errno=" << errno << " : " << std::strerror( errno );
+                throw std::runtime_error( ss.str() );
+            }
+        }
+    }
+
     // TODO: exception handling
     int run_in_container( container_options_t const& opts )
     {
@@ -568,9 +548,9 @@ namespace awaho
         auto const host_container_dir = opts.host_containers_base_dir / anon_user->name();
         std::cout << "Host container dir: " << host_container_dir << std::endl;
 
-        // after execution, reset environment
+        // after execution, destruct environment
         BOOST_SCOPE_EXIT_ALL(&host_container_dir, &opts) {
-            reset_jail_environment(
+            destruct_virtual_root(
                 opts.host_containers_base_dir,
                 host_container_dir,
                 opts.mount_points,
@@ -599,7 +579,9 @@ namespace awaho
             return -3;
         }
 
-        // blocking, wait for cloned process
+        ignore_signals();
+
+        // blocking, wait for cloned process[monitor root]
         int status;
         if ( waitpid( pid, &status, 0) == -1 ) {
             std::cerr << "waitpid failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
@@ -609,26 +591,13 @@ namespace awaho
         return status;
     }
 
-    static const std::array<int, 7> IgnSignals{{
-        SIGHUP,
-        SIGINT,
-        SIGQUIT,
-        SIGPIPE,
-        SIGTERM,
-        SIGXCPU,
-        SIGXFSZ
-    }};
+
+
+
 
     int execute( container_options_t const& opts ) noexcept
     try {
-        for( auto&& sig : IgnSignals ) {
-            if ( ::signal( sig, SIG_IGN ) == SIG_ERR ) {
-                std::stringstream ss;
-                ss << "Failed to signal: " << sig
-                   << " errno=" << errno << " : " << std::strerror( errno );
-                throw std::runtime_error( ss.str() );
-            }
-        }
+
 
         std::cout << opts << std::endl;
 

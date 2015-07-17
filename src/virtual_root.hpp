@@ -5,6 +5,7 @@
 // (See accompanying file LICENSE_1_0.txt or copy at
 // http://www.boost.org/LICENSE_1_0.txt)
 //
+#pragma once
 
 #include <iostream>
 #include <memory>
@@ -156,13 +157,19 @@ namespace awaho
     static auto const guest_tmp_path = fs::path( "./tmp" );
 
     template<typename MountPoints, typename CopyPoints>
-    void create_files_in_jail(
+    void construct_virtual_root(
         fs::path const& host_container_dir,
         MountPoints const& mount_points,
         CopyPoints const& copy_points,
         linux::user const& user
         )
     {
+        std::cerr << "[+] Constructing virtual root for container (host: "
+                  << host_container_dir << ")"<< std::endl;
+
+        // create container dir
+        fs::create_directories( host_container_dir );
+
         // important
         fs::current_path( host_container_dir );
 
@@ -229,25 +236,7 @@ namespace awaho
     }
 
     template<typename MountPoints, typename CopyPoints>
-    void make_jail_environment(
-        fs::path const& host_container_dir,
-        MountPoints const& mount_points,
-        CopyPoints const& copy_points,
-        linux::user const& user
-        )
-    {
-        std::cerr << "make_jail_environment" << std::endl;
-
-        // create container dir
-        fs::create_directories( host_container_dir );
-
-        // create/mount/link files
-        create_files_in_jail( host_container_dir, mount_points, copy_points, user );
-    }
-
-
-    template<typename MountPoints, typename CopyPoints>
-    void reset_jail_environment(
+    void destruct_virtual_root(
         fs::path const& host_jail_base_path,
         fs::path const& host_container_dir,
         MountPoints const& mount_points,

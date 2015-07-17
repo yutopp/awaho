@@ -155,7 +155,7 @@ namespace awaho
         fs::path const& guest_mount_point
         ) noexcept
     {
-        std::cout << "removing: " << guest_mount_point << std::endl;
+        std::cout << "Removing: " << guest_mount_point << std::endl;
         if ( !fs::exists( guest_mount_point ) ) {
             return false;
         }
@@ -195,7 +195,7 @@ namespace awaho
         linux::user const& user
         )
     {
-        std::cout << "chown -> " << guest_path << std::endl;
+        std::cout << "Chown: " << guest_path << std::endl;
 
         if ( ::chown( guest_path.c_str(), user.user_id(), user.group_id() ) != 0 ) {
             std::stringstream ss;
@@ -236,6 +236,8 @@ namespace awaho
         ) noexcept
     {
         try {
+            std::cout << "Removing node: " << guest_node_path << std::endl;
+
             fs::remove( guest_node_path );
 
         } catch( fs::filesystem_error const& e ) {
@@ -258,6 +260,8 @@ namespace awaho
         mode_t const& perm
         )
     {
+        std::cout << "Creating node: " << guest_node_path << std::endl;
+
         if ( fs::exists( guest_node_path ) ) {
             if ( !remove_node( guest_node_path ) ) {
                 std::stringstream ss;
@@ -325,7 +329,7 @@ namespace awaho
         )
     {
         // TODO: add timeout
-        std::cout << "Copying: " << host_copy_point << " to " << guest_copy_point
+        std::cout << "Cp(userfile): " << host_copy_point << " to " << guest_copy_point
                   << " / is dir: " << fs::is_directory( host_copy_point )
                   << " / is sym: " << fs::is_symlink( host_copy_point ) << std::endl;
 
@@ -366,7 +370,7 @@ namespace awaho
         fs::path const& guest_copy_point
         )
     try {
-        std::cout << "Removing: " << guest_copy_point << std::endl;
+        std::cout << "Rm(userfile): " << guest_copy_point << std::endl;
 
         //
         if ( fs::is_symlink( guest_copy_point ) ||
