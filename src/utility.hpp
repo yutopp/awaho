@@ -64,7 +64,7 @@ namespace awaho
 
         auto const cont_buf_len =
             std::accumulate( data_set.cbegin(), data_set.cend(),
-                             0, []( std::size_t const& len, std::string const& r ) {
+                             std::size_t(0), []( std::size_t const& len, std::string const& r ) {
                                  return len + ( r.size() + 1 );     // length + EOF
                              });
 
