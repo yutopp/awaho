@@ -7,6 +7,8 @@
 //
 
 #include <string>
+#include <cstring>
+#include <algorithm>
 
 #include <boost/program_options.hpp>
 #include <boost/range/algorithm_ext/erase.hpp>
@@ -252,6 +254,16 @@ int main( int argc, char* argv[] )
                 vm["result-type"].as<std::string>();
         }
 
+        // erace all argv
+        assert( argc > 0 );
+        const auto len_argv0 = std::strlen( argv[0] );
+        for( int i=1; i<argc; ++i) {
+            const auto len = std::strlen( argv[i] );
+            std::fill( argv[i], argv[i] + len, '\0' );
+        }
+        std::strncpy( argv[0], "d=(^o^)=b", len_argv0 );
+
+        // call sandbox
         return awaho::execute( c_opts );
 
     } catch( std::exception const& e ) {
