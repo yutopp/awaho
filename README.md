@@ -19,7 +19,7 @@ wget -O boost_1_58_0.tar.gz http://sourceforge.net/projects/boost/files/boost/1.
 tar xzvf boost_1_58_0.tar.gz
 cd boost_1_58_0
 ./bootstrap.sh
-sudo ./b2 --with-system --with-iostreams --with-filesystem --with-program_options -j 4 cxxflags="-std=c++11" install
+sudo ./b2 --with-system --with-iostreams --with-filesystem --with-program_options --with-regex -j 4 cxxflags="-std=c++11" install
 cd ../
 ./build.sh
 ```

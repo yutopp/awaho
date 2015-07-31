@@ -13,8 +13,8 @@
 #include <vector>
 #include <memory>
 #include <tuple>
-#include <regex>
 
+#include <boost/regex.hpp>
 #include <boost/range/adaptor/indexed.hpp>
 #include <boost/algorithm/string/case_conv.hpp>
 
@@ -105,10 +105,10 @@ namespace awaho
             throw std::runtime_error( "Failed to reset PATH" );
         }
 
-        std::regex const re("^(.*?)=(.*)$");
+        boost::regex const re("^(.*?)=(.*)$");
         for( auto const& env : envs ) {
-            std::smatch sm;
-            std::regex_search( env, sm, re );
+            boost::smatch sm;
+            boost::regex_search( env, sm, re );
 
             // If 'PATH' is specified, set this as new PATH variable
             if ( sm.size() == 3 ) {
