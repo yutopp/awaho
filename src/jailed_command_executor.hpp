@@ -63,6 +63,13 @@ namespace awaho
         set_limits( opts.limits );
         set_limit( RLIMIT_STACK, opts.stack_size );
 
+        // overwrite host $PATH environment, to search an executable by execpve
+        overwrite_path( opts.envs );
+        auto const& path = ::getenv( "PATH" );
+        if ( path != nullptr ) {
+            std::cout << " = env PATH is " << path << std::endl;
+        }
+
         // log
         std::cout << "[+] chrooted and resource limited!" << std::endl;
 
@@ -121,9 +128,6 @@ namespace awaho
             throw std::runtime_error( ss.str() );
         }
 
-        // overwrite host $PATH environment, to search an executable by execpve
-        overwrite_path( opts.envs );
-
         auto const& filename = opts.commands[0];
 
         auto argv_pack = make_buffer_for_execve( opts.commands );
@@ -135,7 +139,7 @@ namespace awaho
         // replace self process
         if ( ::execvpe( filename.c_str(), argv.data(), envp.data() ) == -1 ) {
             std::stringstream ss;
-            ss << "Failed to execve: "
+            ss << "Failed to execvpe: "
                << " errno=" << errno << " : " << std::strerror( errno );
             throw std::runtime_error( ss.str() );
         }
