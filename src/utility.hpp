@@ -9,11 +9,14 @@
 
 #include <random>
 #include <string>
+#include <cstdlib>
 #include <vector>
 #include <memory>
 #include <tuple>
+#include <regex>
 
 #include <boost/range/adaptor/indexed.hpp>
+#include <boost/algorithm/string/case_conv.hpp>
 
 #include <unistd.h>
 #include <sys/types.h>
@@ -88,6 +91,36 @@ namespace awaho
         assert( argv_cur_len == cont_buf_len );
 
         return std::make_tuple( std::move( ptr_list ), argv_buf );
+    }
+
+    template<typename Envs>
+    auto overwrite_path( Envs const& envs )
+        -> void
+    {
+        // First reset PATH
+        if ( ::unsetenv( "PATH" ) == -1 ) {
+            throw std::runtime_error( "Failed to unset PATH" );
+        }
+        if ( ::setenv( "PATH", "", 1 ) == -1 ) {
+            throw std::runtime_error( "Failed to reset PATH" );
+        }
+
+        std::regex const re("^(.*?)=(.*)$");
+        for( auto const& env : envs ) {
+            std::smatch sm;
+            std::regex_search( env, sm, re );
+
+            // If 'PATH' is specified, set this as new PATH variable
+            if ( sm.size() == 3 ) {
+                if ( boost::to_upper_copy<std::string>( sm[1] ) == "PATH" ) {
+                    std::string const value = sm[2];
+
+                    if ( ::setenv( "PATH", value.c_str(), 1 ) == -1 ) {
+                        throw std::runtime_error( "Failed to set PATH" );
+                    }
+                }
+            }
+        }
     }
 
 } // namespace awaho

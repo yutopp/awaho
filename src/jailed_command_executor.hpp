@@ -60,30 +60,7 @@ namespace awaho
         fs::current_path( opts.in_container_start_path );
 
         // set limits
-        if ( opts.limits.core ) {
-            set_limit( RLIMIT_CORE, *opts.limits.core );
-        }
-        if ( opts.limits.nofile ) {
-            set_limit( RLIMIT_NOFILE, *opts.limits.nofile );
-        }
-        if ( opts.limits.nproc ) {
-            set_limit( RLIMIT_NPROC, *opts.limits.nproc );
-        }
-        if ( opts.limits.memlock ) {
-            set_limit( RLIMIT_MEMLOCK, *opts.limits.memlock );
-        }
-        if ( opts.limits.cputime ) {
-            // CPU can be used only cpu_limit_time(sec)
-            set_limit( RLIMIT_CPU, *opts.limits.cputime, *opts.limits.cputime + 3 );
-        }
-        if ( opts.limits.memory ) {
-            // Memory can be used only memory_limit_bytes [be careful!]
-            set_limit( RLIMIT_AS, *opts.limits.memory, *opts.limits.memory * 1.2 );
-        }
-        if ( opts.limits.fsize ) {
-            set_limit( RLIMIT_FSIZE, *opts.limits.fsize );
-        }
-
+        set_limits( opts.limits );
         set_limit( RLIMIT_STACK, opts.stack_size );
 
         // log
@@ -144,6 +121,9 @@ namespace awaho
             throw std::runtime_error( ss.str() );
         }
 
+        // overwrite host $PATH environment, to search an executable by execpve
+        overwrite_path( opts.envs );
+
         auto const& filename = opts.commands[0];
 
         auto argv_pack = make_buffer_for_execve( opts.commands );
@@ -153,7 +133,7 @@ namespace awaho
         auto& envp = std::get<0>( envp_pack );
 
         // replace self process
-        if ( ::execve( filename.c_str(), argv.data(), envp.data() ) == -1 ) {
+        if ( ::execvpe( filename.c_str(), argv.data(), envp.data() ) == -1 ) {
             std::stringstream ss;
             ss << "Failed to execve: "
                << " errno=" << errno << " : " << std::strerror( errno );
