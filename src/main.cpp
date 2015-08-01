@@ -28,7 +28,7 @@ int main( int argc, char* argv[] )
         ( "base-host-path", po::value<std::string>(), "sandbox path will be $base-host-path/$id" )
 
         ( "start-guest-path", po::value<std::string>(), "cd to $start-guest-path in container at first (Ex. /home/some_user)" )
-        ( "mount", po::value<std::vector<std::string>>(), "host:guest(:rw?)" )
+        ( "mount", po::value<std::vector<std::string>>(), "host:guest(:rw?)(:chown?)" )
         ( "copy", po::value<std::vector<std::string>>(), "host:guest" )
 
         ( "core", po::value<::rlim_t>(), "setrlimit core" )
@@ -129,7 +129,8 @@ int main( int argc, char* argv[] )
                 auto mp = awaho::mount_point{
                     d[0],   // host
                     d[1],   // guest
-                    true    // readonly(default)
+                    true,   // readonly(default)
+                    false,  // do not chown(default)
                 };
 
                 if ( d.size() >= 3 ) {
@@ -140,7 +141,19 @@ int main( int argc, char* argv[] )
                         mp.is_readonly = true;
 
                     } else {
-                        throw std::runtime_error( "unknown mount option" ); // TODO: fix
+                        throw std::runtime_error( "unknown mount option[readonly]" );
+                    }
+                }
+
+                if ( d.size() >= 4 ) {
+                    if ( d[3] == "chown" ) {
+                        mp.do_chown = true;
+
+                    } else if ( d[3] == "" ) {
+                        mp.do_chown = false;
+
+                    } else {
+                        throw std::runtime_error( "unknown mount option[do_chown]" );
                     }
                 }
 

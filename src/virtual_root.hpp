@@ -52,7 +52,6 @@ namespace awaho
         "/usr/lib32",
         "/usr/lib64",
         "/usr/bin",
-        "/usr/local/torigoya",
     };
 
     template<typename F = decltype(&remove_directory_if_empty)>
@@ -204,7 +203,9 @@ namespace awaho
                 nullptr,
                 mountflags
                 );
-            change_directory_owner_rec( in_container_mount_point, user );
+            if ( !users_mp.do_chown ) {
+                change_directory_owner_rec( in_container_mount_point, user );
+            }
         }
 
         //

@@ -30,6 +30,7 @@ namespace awaho
         fs::path guest_path;
 
         bool is_readonly;
+        bool do_chown;
     };
 
     struct copy_point
@@ -88,6 +89,7 @@ namespace awaho
             os << "      HOST     : " << mp.host_path << std::endl
                << "      GUEST    : " << mp.guest_path << std::endl
                << "      READONLY : " << mp.is_readonly << std::endl
+               << "      DO CHOWN : " << mp.do_chown << std::endl
                 ;
         }
 
