@@ -10,13 +10,14 @@
 #include <iostream>
 #include <memory>
 #include <array>
-#include <thread>
-#include <future>
-#include <chrono>
 #include <cstring>
 
 #include <boost/scope_exit.hpp>
 #include <boost/optional.hpp>
+
+#define BOOST_THREAD_PROVIDES_FUTURE
+#include <boost/thread.hpp>
+#include <boost/thread/future.hpp>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/interprocess/anonymous_shared_memory.hpp>
@@ -85,7 +86,7 @@ namespace awaho
 
     void monitor_pid(
         int const pid,
-        std::promise<boost::optional<executed_result>> p
+        boost::promise<boost::optional<executed_result>>& p
         )
     {
         int child_status;
@@ -195,18 +196,20 @@ namespace awaho
 
         } else {
             // parent process(monitor)
-            std::promise<boost::optional<executed_result>> p;
-            auto f = p.get_future();
+            boost::promise<boost::optional<executed_result>> p;
+            boost::future<boost::optional<executed_result>> f = p.get_future();
 
             //
-            std::thread th( monitor_pid, pid, std::move( p ) );
+            boost::thread th( monitor_pid, pid, boost::ref( p ) );
+
+            //
             if ( opts.limits.cputime ) {
                 // realtime checking apart from cgroup limits
                 // prevent sleep() function running infinite
                 // +3 is extention...
                 auto const span
-                    = std::chrono::seconds{ *opts.limits.cputime + 3 };
-                if ( f.wait_for( span ) == std::future_status::timeout ) {
+                    = boost::chrono::seconds{ *opts.limits.cputime + 3 };
+                if ( f.wait_for( span ) == boost::future_status::timeout ) {
                     std::cout << "Timer timeout!" << std::endl;
 
                     // timeouted, so kill the child
@@ -220,6 +223,7 @@ namespace awaho
             }
 
             // wait for result, blocking
+            std::cout << "[+] Monitor: wait for child process termination" << std::endl;
             auto const child_result = f.get();
             th.join();
 
@@ -349,6 +353,7 @@ namespace awaho
 
         // after execution, destruct environment
         BOOST_SCOPE_EXIT_ALL(&host_container_dir, &opts) {
+            std::cout << "[+] Destruct sandbox environment" << std::endl;
             destruct_virtual_root(
                 opts.host_containers_base_dir,
                 host_container_dir,
@@ -385,11 +390,15 @@ namespace awaho
         ignore_signals();
 
         // blocking, wait for cloned process[monitor root]
+        std::cout << "[+] Waitpid(for clone)" << std::endl;
+
         int status;
         if ( waitpid( pid, &status, 0 ) == -1 ) {
             std::cerr << "waitpid failed. errno=" << errno << " : " << std::strerror(errno) << std::endl;
             return -12;
         }
+
+        std::cout << "[+] Finished [run_in_container]" << std::endl;
 
         return status;
     }
