@@ -203,7 +203,7 @@ namespace awaho
                 nullptr,
                 mountflags
                 );
-            if ( !users_mp.do_chown ) {
+            if ( users_mp.do_chown ) {
                 change_directory_owner_rec( in_container_mount_point, user );
             }
         }
