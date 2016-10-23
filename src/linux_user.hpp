@@ -78,8 +78,19 @@ namespace awaho
             ~user()
             {
                 if ( is_user_created_ ) {
-                    auto const stat = std::system( ("userdel " + name_).c_str() );
-                    std::cout << "User deleted: " << name_ << " / delete stat: " << stat << std::endl;
+                    // retry 5 times
+                    for( int i=0; i<5; ++i ) {
+                        // try to delete user
+                        auto const stat = std::system( ("userdel " + name_).c_str() );
+                        if ( stat == -1 || !WIFEXITED(stat) || WEXITSTATUS(stat) != 0 ) {
+                            std::cout << "Failed to delete user: " << name_
+                                      << " / exit_status: " << WEXITSTATUS(stat)
+                                      << " (retry: " << i + 1 << "/5)" << std::endl;
+                        } else {
+                            std::cout << "User deleted: " << name_ << std::endl;
+                            break;
+                        }
+                    }
                 }
             }
 
