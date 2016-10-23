@@ -76,8 +76,7 @@ namespace awaho
                 remove_container_directory( p, rm_f );
 
             } else if ( fs::is_regular_file( p ) ) {
-                // TODO: remove
-                std::cout << "Not implemented: rm " << p << std::endl;
+                remove_file( p );
             }
         }
 

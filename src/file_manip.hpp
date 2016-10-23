@@ -254,6 +254,29 @@ namespace awaho
         return true;
     }
 
+    bool remove_file(
+        fs::path const& guest_file_path
+        ) noexcept
+    {
+        try {
+            std::cout << "Removing file: " << guest_file_path << std::endl;
+
+            fs::remove( guest_file_path );
+
+        } catch( fs::filesystem_error const& e ) {
+            std::cerr << "Failed to remove_file: " << guest_file_path
+                      << " / reason: " << e.what() << std::endl;
+            return false;
+
+        } catch(...) {
+            std::cerr << "Failed to remove_file: " << guest_file_path
+                      << " / unexpected" << std::endl;
+            return false;
+        }
+
+        return true;
+    }
+
     void make_node(
         fs::path const& guest_node_path,
         dev_t const& dev,

@@ -22,6 +22,8 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 
+#include <grp.h>
+
 #include "rlimit.hpp"
 #include "virtual_root.hpp"
 #include "container_options.hpp"
@@ -102,6 +104,15 @@ namespace awaho
         }
 
         // === discard privilege
+        // remove supplementary groups
+        const gid_t s_groups[] = {};
+        if ( ::setgroups( 0, s_groups ) == -1 ) {
+            std::stringstream ss;
+            ss << "Failed to setgroups: "
+               << " errno=" << errno << " : " << std::strerror( errno );
+            throw std::runtime_error( ss.str() );
+        }
+
         // change group
         if ( ::setresgid( user.group_id(), user.group_id(), user.group_id() ) == -1 ) {
             std::stringstream ss;
