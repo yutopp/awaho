@@ -67,7 +67,8 @@ namespace awaho
 
         auto const cont_buf_len =
             std::accumulate( data_set.cbegin(), data_set.cend(),
-                             std::size_t(0), []( std::size_t const& len, std::string const& r ) {
+                             std::size_t(0),
+                             []( std::size_t const& len, std::string const& r ) {
                                  return len + ( r.size() + 1 );     // length + EOF
                              });
 
@@ -89,6 +90,7 @@ namespace awaho
             argv_cur_len += im.value().size() + 1;  // +1 is EOF
         }
         assert( argv_cur_len == cont_buf_len );
+        assert( ptr_list[data_set.size()] == nullptr );
 
         return std::make_tuple( std::move( ptr_list ), argv_buf );
     }
