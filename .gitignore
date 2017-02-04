@@ -1,3 +1,4 @@
 awaho
 containers_tmp/
 .gdb_history
+*.o

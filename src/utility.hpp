@@ -47,7 +47,7 @@ namespace awaho
         return std::string("_") + random_chars;
     }
 
-    void expect_root()
+    void expect_cap()
     {
         if ( ::geteuid() != 0 ) {
             throw std::runtime_error( "you must run this program as root" );

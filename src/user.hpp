@@ -22,7 +22,7 @@ namespace awaho
         -> boost::optional<user>
     {
         try {
-            expect_root();
+            expect_cap();
         } catch( std::runtime_error const& e ) {
             // e...
             return boost::none;

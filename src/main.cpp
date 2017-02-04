@@ -12,6 +12,7 @@
 
 #include <boost/program_options.hpp>
 #include <boost/range/algorithm_ext/erase.hpp>
+#include <boost/algorithm/string.hpp>
 
 #include <sys/resource.h>
 
